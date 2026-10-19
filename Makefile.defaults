@@ -71,6 +71,11 @@ NETSURF_USE_WEBP := AUTO
 # Valid options: YES, NO
 NETSURF_USE_DUKTAPE := YES
 
+# Enable NetSurf's use of QuickJS-ng for javascript.  When enabled this
+# is used in preference to duktape.
+# Valid options: YES, NO
+NETSURF_USE_QUICKJS := NO
+
 # Enable NetSurf's use of libharu for PDF export and GTK printing support.
 # There is no auto-detection available for this, as it does not have a
 # pkg-config file.

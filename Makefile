@@ -124,6 +124,7 @@ $(eval $(call feature_switch,JPEG,JPEG (libjpeg),-DWITH_JPEG,-ljpeg,-UWITH_JPEG,
 $(eval $(call feature_switch,HARU_PDF,PDF export (haru),-DWITH_PDF_EXPORT,-lhpdf -lpng,-UWITH_PDF_EXPORT,))
 $(eval $(call feature_switch,LIBICONV_PLUG,glibc internal iconv,-DLIBICONV_PLUG,,-ULIBICONV_PLUG,-liconv))
 $(eval $(call feature_switch,DUKTAPE,Javascript (Duktape),,,,,))
+$(eval $(call feature_switch,QUICKJS,Javascript (QuickJS-ng),,,,,))
 
 # Common libraries with pkgconfig
 $(eval $(call pkg_config_find_and_add,libcss,CSS))
