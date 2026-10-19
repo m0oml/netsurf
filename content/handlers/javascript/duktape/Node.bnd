@@ -406,7 +406,9 @@ method Node::insertBefore()
 
 	dom_node *before = NULL;
 
-	if (duk_get_top(ctx) == 2) {
+	/* a null reference node inserts at the end */
+	if ((duk_get_top(ctx) == 2) &&
+	    !duk_is_null(ctx, 1) && !duk_is_undefined(ctx, 1)) {
 		if (!dukky_instanceof(ctx, 1, PROTO_NAME(NODE))) return 0;
 		duk_get_prop_string(ctx, 1, PRIVATE_MAGIC);
 		node_private_t *another = duk_get_pointer(ctx, -1);
