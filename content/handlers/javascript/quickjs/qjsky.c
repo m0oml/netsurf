@@ -53,6 +53,7 @@
 #include "quickjs/binding.h"
 #include "quickjs/generics.js.inc"
 #include "quickjs/polyfill.js.inc"
+#include "quickjs/webcompat.js.inc"
 
 #include "engine/quickjs.h"
 #include "duk_compat.h"
@@ -1315,6 +1316,17 @@ js_newthread(jsheap *heap, void *win_priv, void *doc_priv, jsthread **thread)
 		js_destroythread(ret);
 		return NSERROR_INIT_FAILED;
 	}
+
+	/* And the interfaces implemented in javascript */
+	res = qjsky_eval(ret->jctx, webcompat_js, webcompat_js_len,
+			 "", "", "webcompat.js");
+	if (JS_IsException(res)) {
+		qjsky_dump_exception(ret->jctx);
+		NSLOG(qjsky, CRITICAL, "Unable to run webcompat.js, thread aborted");
+		js_destroythread(ret);
+		return NSERROR_INIT_FAILED;
+	}
+	JS_FreeValue(ret->jctx, res);
 
 	dukky_log_stack_frame(ret->ctx, "New thread created");
 	NSLOG(qjsky, DEBUG, "New thread is %p in heap %p", ret, heap);

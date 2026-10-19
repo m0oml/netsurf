@@ -28,7 +28,15 @@ QJS_BINDINGS := $(wildcard $(QJS_DUKTAPE_DIR)/*.bnd)
 content/handlers/javascript/quickjs/qjsky.c: \
 	$(OBJROOT)/quickjs/binding.h \
 	$(OBJROOT)/quickjs/generics.js.inc \
-	$(OBJROOT)/quickjs/polyfill.js.inc
+	$(OBJROOT)/quickjs/polyfill.js.inc \
+	$(OBJROOT)/quickjs/webcompat.js.inc
+
+# Generator for the C include representing the webcompat.js
+$(OBJROOT)/quickjs/webcompat.js.inc: content/handlers/javascript/quickjs/webcompat.js $(TOOLROOT)/xxd
+	$(Q)$(MKDIR) -p $(OBJROOT)/quickjs
+	$(VQ)echo "     XXD: $<"
+	$(Q)$(TOOLROOT)/xxd -i $< $@.tmp
+	$(Q)sed -e 's/content_handlers_javascript_quickjs_webcompat_js/webcompat_js/' $@.tmp > $@
 
 # Generator for the C include representing the generics.js
 $(OBJROOT)/quickjs/generics.js.inc: $(QJS_DUKTAPE_DIR)/generics.js $(TOOLROOT)/xxd
