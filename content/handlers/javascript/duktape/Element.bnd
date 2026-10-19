@@ -220,6 +220,20 @@ method Element::getElementsByTagName ()
 	return 1;
 %}
 
+getter Element::tagName ()
+%{
+	dom_string *tag = NULL;
+	dom_exception exc;
+
+	exc = dom_element_get_tag_name(priv->parent.node, &tag);
+	if ((exc != DOM_NO_ERR) || (tag == NULL)) return 0;
+
+	duk_push_lstring(ctx, dom_string_data(tag), dom_string_length(tag));
+	dom_string_unref(tag);
+
+	return 1;
+%}
+
 getter Element::id ()
 %{
 	dom_string *idstr = NULL;
