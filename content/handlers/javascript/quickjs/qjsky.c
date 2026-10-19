@@ -728,14 +728,21 @@ static int dukky_node_klass(struct dom_node *node)
 	case DOM_DOCUMENT_NODE:
 		klass = PROTO_NAME(DOCUMENT);
 		break;
+	case DOM_DOCUMENT_FRAGMENT_NODE:
+		klass = PROTO_NAME(DOCUMENTFRAGMENT);
+		break;
+	case DOM_DOCUMENT_TYPE_NODE:
+		klass = PROTO_NAME(DOCUMENTTYPE);
+		break;
+	case DOM_CDATA_SECTION_NODE:
+		/* CDATASection has no binding of its own */
+		klass = PROTO_NAME(TEXT);
+		break;
 	case DOM_ATTRIBUTE_NODE:
 	case DOM_PROCESSING_INSTRUCTION_NODE:
-	case DOM_DOCUMENT_TYPE_NODE:
-	case DOM_DOCUMENT_FRAGMENT_NODE:
 	case DOM_NOTATION_NODE:
 	case DOM_ENTITY_REFERENCE_NODE:
 	case DOM_ENTITY_NODE:
-	case DOM_CDATA_SECTION_NODE:
 	default:
 		/* Oh bum, just node then */
 		break;
