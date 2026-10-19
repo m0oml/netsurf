@@ -739,6 +739,8 @@ static int dukky_node_klass(struct dom_node *node)
 		klass = PROTO_NAME(TEXT);
 		break;
 	case DOM_ATTRIBUTE_NODE:
+		klass = PROTO_NAME(ATTR);
+		break;
 	case DOM_PROCESSING_INSTRUCTION_NODE:
 	case DOM_NOTATION_NODE:
 	case DOM_ENTITY_REFERENCE_NODE:

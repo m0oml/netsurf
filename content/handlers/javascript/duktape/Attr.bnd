@@ -1,0 +1,166 @@
+/* Attr binding for browser using duktape and libdom
+ *
+ * Copyright 2026 Trevor Cockayne
+ *
+ * This file is part of NetSurf, http://www.netsurf-browser.org/
+ *
+ * Released under the terms of the MIT License,
+ *         http://www.opensource.org/licenses/mit-license
+ */
+
+init Attr(struct dom_attr *attr::node);
+
+prologue Attr()
+%{
+/**
+ * Push a dom string, or null if there is none.
+ */
+static void attr_push_string(duk_context *ctx, dom_string *str)
+{
+	if (str == NULL) {
+		duk_push_null(ctx);
+	} else {
+		duk_push_lstring(ctx, dom_string_data(str), dom_string_length(str));
+		dom_string_unref(str);
+	}
+}
+
+/**
+ * Push the value of an attribute.
+ */
+static duk_ret_t attr_push_value(duk_context *ctx, dom_node *node)
+{
+	dom_exception exc;
+	dom_string *value = NULL;
+
+	exc = dom_attr_get_value((dom_attr *)node, &value);
+	if (exc != DOM_NO_ERR) return 0;
+	if (value == NULL) {
+		duk_push_lstring(ctx, "", 0);
+	} else {
+		attr_push_string(ctx, value);
+	}
+	return 1;
+}
+
+/**
+ * Set the value of an attribute from the first argument.
+ */
+static duk_ret_t attr_set_value(duk_context *ctx, dom_node *node)
+{
+	dom_exception exc;
+	dom_string *value;
+	duk_size_t slen;
+	const char *s;
+
+	s = duk_safe_to_lstring(ctx, 0, &slen);
+	exc = dom_string_create((const uint8_t *)s, slen, &value);
+	if (exc != DOM_NO_ERR) return 0;
+
+	(void)dom_attr_set_value((dom_attr *)node, value);
+	dom_string_unref(value);
+
+	return 0;
+}
+%}
+
+getter Attr::name()
+%{
+	dom_exception exc;
+	dom_string *name = NULL;
+
+	exc = dom_attr_get_name((dom_attr *)priv->parent.node, &name);
+	if (exc != DOM_NO_ERR) return 0;
+	attr_push_string(ctx, name);
+	return 1;
+%}
+
+getter Attr::localName()
+%{
+	dom_exception exc;
+	dom_string *name = NULL;
+
+	exc = dom_node_get_local_name(priv->parent.node, &name);
+	if (exc != DOM_NO_ERR) return 0;
+	if (name == NULL) {
+		/* not namespaced so the local name is the name */
+		exc = dom_attr_get_name((dom_attr *)priv->parent.node, &name);
+		if (exc != DOM_NO_ERR) return 0;
+	}
+	attr_push_string(ctx, name);
+	return 1;
+%}
+
+getter Attr::namespaceURI()
+%{
+	dom_exception exc;
+	dom_string *ns = NULL;
+
+	exc = dom_node_get_namespace(priv->parent.node, &ns);
+	if (exc != DOM_NO_ERR) return 0;
+	attr_push_string(ctx, ns);
+	return 1;
+%}
+
+getter Attr::prefix()
+%{
+	dom_exception exc;
+	dom_string *prefix = NULL;
+
+	exc = dom_node_get_prefix(priv->parent.node, &prefix);
+	if (exc != DOM_NO_ERR) return 0;
+	attr_push_string(ctx, prefix);
+	return 1;
+%}
+
+getter Attr::value()
+%{
+	return attr_push_value(ctx, priv->parent.node);
+%}
+
+setter Attr::value()
+%{
+	return attr_set_value(ctx, priv->parent.node);
+%}
+
+getter Attr::nodeValue()
+%{
+	return attr_push_value(ctx, priv->parent.node);
+%}
+
+setter Attr::nodeValue()
+%{
+	return attr_set_value(ctx, priv->parent.node);
+%}
+
+getter Attr::textContent()
+%{
+	return attr_push_value(ctx, priv->parent.node);
+%}
+
+setter Attr::textContent()
+%{
+	return attr_set_value(ctx, priv->parent.node);
+%}
+
+getter Attr::ownerElement()
+%{
+	dom_exception exc;
+	dom_element *owner = NULL;
+
+	exc = dom_attr_get_owner_element((dom_attr *)priv->parent.node, &owner);
+	if (exc != DOM_NO_ERR) return 0;
+	if (owner == NULL) {
+		duk_push_null(ctx);
+		return 1;
+	}
+	dukky_push_node(ctx, (dom_node *)owner);
+	dom_node_unref(owner);
+	return 1;
+%}
+
+getter Attr::specified()
+%{
+	duk_push_boolean(ctx, true);
+	return 1;
+%}

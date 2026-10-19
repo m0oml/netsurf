@@ -465,6 +465,8 @@ dukky_push_node_klass(duk_context *ctx, struct dom_node *node)
 		duk_push_string(ctx, PROTO_NAME(DOCUMENT));
 		break;
 	case DOM_ATTRIBUTE_NODE:
+		duk_push_string(ctx, PROTO_NAME(ATTR));
+		break;
 	case DOM_PROCESSING_INSTRUCTION_NODE:
 	case DOM_DOCUMENT_TYPE_NODE:
 	case DOM_DOCUMENT_FRAGMENT_NODE:
