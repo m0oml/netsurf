@@ -1,0 +1,59 @@
+/* Binding for browser using QuickJS and libdom
+ *
+ * Copyright 2015 Vincent Sanders <vince@netsurf-browser.org>
+ * Copyright 2026 Trevor Cockayne
+ *
+ * This file is part of NetSurf, http://www.netsurf-browser.org/
+ *
+ * Released under the terms of the MIT License,
+ *         http://www.opensource.org/licenses/mit-license
+ *
+ * The build appends the class bindings from duktape/netsurf.bnd to this
+ * block, so the binding bodies are shared between the engines.
+ */
+
+binding qjs_libdom {
+	webidl "dom.idl";
+	webidl "dom-parsing.idl";
+	webidl "html.idl";
+	webidl "cssom.idl";
+	webidl "uievents.idl";
+	webidl "urlutils.idl";
+	webidl "console.idl";
+
+	preface	%{
+/* QuickJS JavaScript bindings for NetSurf browser
+ *
+ * Copyright 2015 Vincent Sanders <vince@netsurf-browser.org>
+ * This file is part of NetSurf, http://www.netsurf-browser.org/
+ * Released under the terms of the MIT License,
+ *        http://www.opensource.org/licenses/mit-license
+ */
+
+#include <dom/dom.h>
+
+#include "utils/log.h"
+#include "utils/nsurl.h"
+
+#include "javascript/quickjs/duk_compat.h"
+
+struct browser_window;
+struct html_content;
+struct dom_node;
+struct dom_element;
+struct dom_document;
+struct dom_html_element;
+struct dom_node_character_data;
+struct dom_node_text;
+struct dom_node_list;
+struct dom_node_comment;
+struct dom_html_collection;
+struct dom_html_br_element;
+
+%};
+
+	prologue %{
+#include "javascript/quickjs/qjsky.h"
+%};
+
+};

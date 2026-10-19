@@ -474,9 +474,18 @@ qjsduk_invoke(JSContext *jctx,
 {
 	duk_context *ctx = qjsduk_from_js(jctx);
 	struct qjsduk_frame frame;
+	JSValue global = JS_UNDEFINED;
 	JSValue res;
 	duk_ret_t ret;
 	int arg;
+
+	/* functions called without an object act on the global object as
+	 * they do in browsers
+	 */
+	if (JS_IsUndefined(this_val)) {
+		global = JS_GetGlobalObject(jctx);
+		this_val = global;
+	}
 
 	frame_enter(ctx, &frame, ctx->top, this_val);
 
@@ -488,6 +497,8 @@ qjsduk_invoke(JSContext *jctx,
 
 	res = frame_result(ctx, ret);
 	frame_leave(ctx, &frame);
+
+	JS_FreeValue(jctx, global);
 
 	return res;
 }

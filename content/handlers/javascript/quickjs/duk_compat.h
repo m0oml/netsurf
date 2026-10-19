@@ -47,6 +47,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdarg.h>
+/* binding bodies rely on these as duktape.h includes them */
+#include <stdlib.h>
+#include <string.h>
 
 #include "javascript/quickjs/engine/quickjs.h"
 
