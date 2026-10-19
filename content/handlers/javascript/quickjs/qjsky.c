@@ -39,6 +39,7 @@
 #include "javascript/content.h"
 
 #include "engine/quickjs.h"
+#include "duk_compat.h"
 
 /** Wallclock time a script may run before it is interrupted */
 #define JS_EXEC_TIMEOUT_MS 10000 /* 10 seconds */
@@ -204,6 +205,14 @@ static void qjsky_run_jobs(jsheap *heap)
 			qjsky_dump_exception(job_ctx);
 		}
 	}
+}
+
+
+/* exported interface documented in duk_compat.h */
+void *qjsduk_lookup_private(duk_context *ctx, JSValueConst obj)
+{
+	/** \todo Resolve binding objects once the bindings exist */
+	return NULL;
 }
 
 

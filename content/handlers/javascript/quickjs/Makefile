@@ -21,4 +21,5 @@ $(QJS_ENGINE_OBJECTS): CFLAGS += -std=gnu11
 $(QJS_ENGINE_OBJECTS): COMMON_WARNFLAGS := -w
 $(QJS_ENGINE_OBJECTS): CWARNFLAGS :=
 
-S_JAVASCRIPT += content.c quickjs/qjsky.c $(QJS_ENGINE_SOURCES)
+S_JAVASCRIPT += content.c quickjs/qjsky.c quickjs/duk_compat.c \
+	$(QJS_ENGINE_SOURCES)
