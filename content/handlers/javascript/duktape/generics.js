@@ -7,20 +7,40 @@
  * object which is used by the rest of the bindings.
  */
 
-var NetSurf = {
+var NetSurf = (function() {
+
+/* Convert a proxy property key to an array index.
+ *
+ * Duktape passes array index keys as numbers while standard engines pass
+ * them as canonical numeric strings.  Returns -1 if the key is not an
+ * array index.
+ */
+function keyIndex(key) {
+    if (typeof key == 'number') {
+	return key;
+    }
+    if ((typeof key == 'string') && (key !== '') && (String(key >>> 0) === key)) {
+	return key >>> 0;
+    }
+    return -1;
+}
+
+return {
     /* The make-proxy call for list-type objects */
     makeListProxy: function(inner) {
 	return new Proxy(inner, {
 	    has: function(target, key) {
-		if (typeof key == 'number') {
-		    return (key >= 0) && (key < target.length);
+		var index = keyIndex(key);
+		if (index != -1) {
+		    return (index >= 0) && (index < target.length);
 		} else {
 		    return key in target;
 		}
 	    },
 	    get: function(target, key) {
-		if (typeof key == 'number') {
-		    return target.item(key);
+		var index = keyIndex(key);
+		if (index != -1) {
+		    return target.item(index);
 		} else {
 		    return target[key];
 		}
@@ -31,15 +51,17 @@ var NetSurf = {
     makeNodeMapProxy: function(inner) {
 	return new Proxy(inner, {
 	    has: function(target, key) {
-		if (typeof key == 'number') {
-		    return (key >= 0) && (key < target.length);
+		var index = keyIndex(key);
+		if (index != -1) {
+		    return (index >= 0) && (index < target.length);
 		} else {
 		    return target.getNamedItem(key) || (key in target);
 		}
 	    },
 	    get: function(target, key) {
-		if (typeof key == 'number') {
-		    return target.item(key);
+		var index = keyIndex(key);
+		if (index != -1) {
+		    return target.item(index);
 		} else {
 		    var attr = target.getNamedItem(key);
 		    if (attr) {
@@ -127,3 +149,5 @@ var NetSurf = {
 	return Formatter.apply(result);
     }
 };
+
+})();
