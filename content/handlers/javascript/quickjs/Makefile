@@ -59,10 +59,17 @@ $(OBJROOT)/quickjs/netsurf.bnd: content/handlers/javascript/quickjs/binding.bnd 
 # ensure genbind generates debugging files
 GBFLAGS+=-D
 
-$(OBJROOT)/quickjs/binding.h $(OBJROOT)/quickjs/Makefile: $(OBJROOT)/quickjs/netsurf.bnd $(QJS_BINDINGS)
+# nsgenbind only rewrites outputs whose content changes, so a stamp
+# records when generation last ran and everything generated depends on
+# it.  This runs the generator once and ensures changed sources are seen
+# by the same make invocation.
+$(OBJROOT)/quickjs/generated.stamp: $(OBJROOT)/quickjs/netsurf.bnd $(QJS_BINDINGS)
 	$(Q)$(MKDIR) -p $(OBJROOT)/quickjs
 	$(VQ)echo " GENBIND: $<"
 	$(Q)nsgenbind $(GBFLAGS) -I content/handlers/javascript/WebIDL $< $(OBJROOT)/quickjs
+	$(Q)touch $@
+
+$(OBJROOT)/quickjs/binding.h $(OBJROOT)/quickjs/Makefile: $(OBJROOT)/quickjs/generated.stamp ;
 
 ifeq ($(filter $(MAKECMDGOALS),clean test coverage),)
 -include $(OBJROOT)/quickjs/Makefile
@@ -70,7 +77,7 @@ endif
 
 S_JAVASCRIPT_BINDING:=$(addprefix $(OBJROOT)/quickjs/,$(NSGENBIND_SOURCES))
 
-$(S_JAVASCRIPT_BINDING): $(QJS_BINDINGS)
+$(S_JAVASCRIPT_BINDING): $(OBJROOT)/quickjs/generated.stamp ;
 
 S_JAVASCRIPT += content.c quickjs/qjsky.c quickjs/duk_compat.c \
 	$(QJS_ENGINE_SOURCES)
