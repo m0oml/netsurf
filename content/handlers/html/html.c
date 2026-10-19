@@ -897,6 +897,11 @@ html_begin_conversion(html_content *htmlc)
 	/* fire a simple event that bubbles named DOMContentLoaded at
 	 * the Document.
 	 */
+	if (htmlc->jsthread != NULL) {
+		js_fire_event(htmlc->jsthread, "DOMContentLoaded",
+			      htmlc->document,
+			      (struct dom_node *)htmlc->document);
+	}
 
 	/* get encoding */
 	if (htmlc->encoding == NULL) {

@@ -1643,6 +1643,126 @@ static void qjsky_log_handler_error(duk_context *ctx)
 	/* ... err */
 }
 
+/**
+ * Push the object for an event target, NULL being the Window.
+ */
+static void qjsky_push_target(duk_context *ctx, dom_event_target *targ)
+{
+	if (targ == NULL) {
+		duk_push_global_object(ctx);
+	} else {
+		dukky_push_node(ctx, (dom_node *)targ);
+	}
+}
+
+/**
+ * Call the javascript listeners added with addEventListener.
+ *
+ * \param ctx The compatibility context
+ * \param name The event type
+ * \param evt The event
+ * \param phase The phase of the event flow
+ * \param targ The current target or NULL for the Window
+ */
+static void
+qjsky_call_listeners(duk_context *ctx,
+		     dom_string *name,
+		     dom_event *evt,
+		     dom_event_flow_phase phase,
+		     dom_event_target *targ)
+{
+	dom_exception exc;
+	duk_uarridx_t idx;
+	event_listener_flags flags;
+
+	/* ... */
+	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
+	qjsky_push_target(ctx, targ);
+	/* ... type node */
+	if (dukky_event_target_push_listeners(ctx, true)) {
+		/* Nothing to do */
+		duk_pop(ctx);
+		return;
+	}
+	/* ... sublisteners */
+	duk_push_array(ctx);
+	/* ... sublisteners copy */
+	idx = 0;
+	while (duk_get_prop_index(ctx, -2, idx)) {
+		/* ... sublisteners copy handler */
+		duk_get_prop_index(ctx, -1, 1);
+		/* ... sublisteners copy handler flags */
+		if ((event_listener_flags)duk_to_int(ctx, -1) & ELF_ONCE) {
+			duk_dup(ctx, -4);
+			/* ... subl copy handler flags subl */
+			dukky_shuffle_array(ctx, idx);
+			duk_pop(ctx);
+			/* ... subl copy handler flags */
+		}
+		duk_pop(ctx);
+		/* ... sublisteners copy handler */
+		duk_put_prop_index(ctx, -2, idx);
+		/* ... sublisteners copy */
+		idx++;
+	}
+	/* ... sublisteners copy undefined */
+	duk_pop(ctx);
+	/* ... sublisteners copy */
+	duk_insert(ctx, -2);
+	/* ... copy sublisteners */
+	duk_pop(ctx);
+	/* ... copy */
+	idx = 0;
+	while (duk_get_prop_index(ctx, -1, idx++)) {
+		/* ... copy handler */
+		if (duk_get_prop_index(ctx, -1, 2)) {
+			/* ... copy handler meh */
+			duk_pop_2(ctx);
+			continue;
+		}
+		duk_pop(ctx);
+		duk_get_prop_index(ctx, -1, 0);
+		duk_get_prop_index(ctx, -2, 1);
+		/* ... copy handler callback flags */
+		flags = (event_listener_flags)duk_get_int(ctx, -1);
+		duk_pop(ctx);
+		/* ... copy handler callback */
+		if (((phase == DOM_CAPTURING_PHASE) && !(flags & ELF_CAPTURE)) ||
+		    ((phase != DOM_CAPTURING_PHASE) && (flags & ELF_CAPTURE))) {
+			duk_pop_2(ctx);
+			/* ... copy */
+			continue;
+		}
+		/* ... copy handler callback */
+		qjsky_push_target(ctx, targ);
+		/* ... copy handler callback node */
+		dukky_push_event(ctx, evt);
+		/* ... copy handler callback node event */
+		if (qjsky_pcall_method(ctx, 1) != 0) {
+			/* Failed to run the method */
+			/* ... copy handler err */
+			NSLOG(qjsky, DEBUG,
+			      "OH NOES! An error running a callback.  Meh.");
+			exc = dom_event_stop_immediate_propagation(evt);
+			if (exc != DOM_NO_ERR)
+				NSLOG(qjsky, DEBUG,
+				      "WORSE! could not stop propagation");
+			qjsky_log_handler_error(ctx);
+			duk_pop_2(ctx);
+			/* ... copy */
+			continue;
+		}
+		/* ... copy handler result */
+		if (duk_is_boolean(ctx, -1) &&
+		    duk_to_boolean(ctx, -1) == 0) {
+			dom_event_prevent_default(evt);
+		}
+		duk_pop_2(ctx);
+		/* ... copy */
+	}
+	duk_pop_2(ctx);
+}
+
 static void dukky_generic_event_handler(dom_event *evt, void *pw)
 {
 	duk_context *ctx = (duk_context *)pw;
@@ -1650,8 +1770,6 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 	dom_exception exc;
 	dom_event_target *targ;
 	dom_event_flow_phase phase;
-	duk_uarridx_t idx;
-	event_listener_flags flags;
 
 	NSLOG(qjsky, DEBUG, "Handling an event in QuickJS interface...");
 	exc = dom_event_get_type(evt, &name);
@@ -1722,94 +1840,8 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 	}
 	duk_pop(ctx);
 handle_extras:
-	/* ... */
-	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
-	dukky_push_node(ctx, (dom_node *)targ);
-	/* ... type node */
-	if (dukky_event_target_push_listeners(ctx, true)) {
-		/* Nothing to do */
-		duk_pop(ctx);
-		goto out;
-	}
-	/* ... sublisteners */
-	duk_push_array(ctx);
-	/* ... sublisteners copy */
-	idx = 0;
-	while (duk_get_prop_index(ctx, -2, idx)) {
-		/* ... sublisteners copy handler */
-		duk_get_prop_index(ctx, -1, 1);
-		/* ... sublisteners copy handler flags */
-		if ((event_listener_flags)duk_to_int(ctx, -1) & ELF_ONCE) {
-			duk_dup(ctx, -4);
-			/* ... subl copy handler flags subl */
-			dukky_shuffle_array(ctx, idx);
-			duk_pop(ctx);
-			/* ... subl copy handler flags */
-		}
-		duk_pop(ctx);
-		/* ... sublisteners copy handler */
-		duk_put_prop_index(ctx, -2, idx);
-		/* ... sublisteners copy */
-		idx++;
-	}
-	/* ... sublisteners copy undefined */
-	duk_pop(ctx);
-	/* ... sublisteners copy */
-	duk_insert(ctx, -2);
-	/* ... copy sublisteners */
-	duk_pop(ctx);
-	/* ... copy */
-	idx = 0;
-	while (duk_get_prop_index(ctx, -1, idx++)) {
-		/* ... copy handler */
-		if (duk_get_prop_index(ctx, -1, 2)) {
-			/* ... copy handler meh */
-			duk_pop_2(ctx);
-			continue;
-		}
-		duk_pop(ctx);
-		duk_get_prop_index(ctx, -1, 0);
-		duk_get_prop_index(ctx, -2, 1);
-		/* ... copy handler callback flags */
-		flags = (event_listener_flags)duk_get_int(ctx, -1);
-		duk_pop(ctx);
-		/* ... copy handler callback */
-		if (((phase == DOM_CAPTURING_PHASE) && !(flags & ELF_CAPTURE)) ||
-		    ((phase != DOM_CAPTURING_PHASE) && (flags & ELF_CAPTURE))) {
-			duk_pop_2(ctx);
-			/* ... copy */
-			continue;
-		}
-		/* ... copy handler callback */
-		dukky_push_node(ctx, (dom_node *)targ);
-		/* ... copy handler callback node */
-		dukky_push_event(ctx, evt);
-		/* ... copy handler callback node event */
-		if (qjsky_pcall_method(ctx, 1) != 0) {
-			/* Failed to run the method */
-			/* ... copy handler err */
-			NSLOG(qjsky, DEBUG,
-			      "OH NOES! An error running a callback.  Meh.");
-			exc = dom_event_stop_immediate_propagation(evt);
-			if (exc != DOM_NO_ERR)
-				NSLOG(qjsky, DEBUG,
-				      "WORSE! could not stop propagation");
-			qjsky_log_handler_error(ctx);
-			duk_pop_2(ctx);
-			/* ... copy */
-			continue;
-		}
-		/* ... copy handler result */
-		if (duk_is_boolean(ctx, -1) &&
-		    duk_to_boolean(ctx, -1) == 0) {
-			dom_event_prevent_default(evt);
-		}
-		duk_pop_2(ctx);
-		/* ... copy */
-	}
-	duk_pop_2(ctx);
-out:
-	/* ... */
+	qjsky_call_listeners(ctx, name, evt, phase, targ);
+
 	dom_node_unref(targ);
 	dom_string_unref(name);
 }
@@ -2044,102 +2076,149 @@ void js_event_cleanup(jsthread *thread, struct dom_event *evt)
 }
 
 
-/* exported interface documented in js.h */
-bool js_fire_event(jsthread *thread, const char *type, struct dom_document *doc, struct dom_node *target)
+/**
+ * Run the Window's part of an event.
+ *
+ * Calls the Window's on<type> handler and then its listeners.  The load
+ * handler may come from the body's onload attribute, which is forwarded
+ * to the Window.
+ *
+ * \param thread The thread to run in
+ * \param evt The event
+ * \param type The event type
+ * \param doc The document, for the body load handler
+ * \param phase The event phase at the Window
+ */
+static void
+qjsky_window_event(jsthread *thread,
+		   dom_event *evt,
+		   dom_string *type,
+		   struct dom_document *doc,
+		   dom_event_flow_phase phase)
 {
-	dom_exception exc;
-	dom_event *evt;
 	dom_event_target *body;
+	dom_exception exc;
+	bool have_handler = true;
 
-	NSLOG(qjsky, DEBUG, "Event: %s (doc=%p, target=%p)", type, doc,
-	      target);
-
-	/** @todo Make this more generic, this only handles load and only
-	 * targetting the window, so that we actually stand a chance of
-	 * getting 3.4 out.
-	 */
-
-	if (target != NULL)
-		/* Swallow non-Window-targetted events quietly */
-		return true;
-
-	if (strcmp(type, "load") != 0)
-		/* Swallow non-load events quietly */
-		return true;
-
-	/* Okay, we're processing load, targetted at Window, do the single
-	 * thing which gets us there, which is to find the appropriate event
-	 * handler and call it.  If we have no event handler on Window then
-	 * we divert to the body, and if there's no event handler there
-	 * we swallow the event silently
-	 */
-
-	exc = dom_event_create(&evt);
-	if (exc != DOM_NO_ERR) return true;
-	exc = dom_event_init(evt, corestring_dom_load, false, false);
-	if (exc != DOM_NO_ERR) {
-		dom_event_unref(evt);
-		return true;
-	}
-	qjsky_enter_thread(thread);
 	/* ... */
 	duk_get_global_string(CTX, HANDLER_MAGIC);
 	/* ... handlers */
-	duk_push_lstring(CTX, "load", 4);
-	/* ... handlers "load" */
+	duk_push_lstring(CTX, dom_string_data(type), dom_string_length(type));
+	/* ... handlers type */
 	duk_get_prop(CTX, -2);
 	/* ... handlers handler? */
-	if (duk_is_undefined(CTX, -1)) {
+	if (duk_is_undefined(CTX, -1) &&
+	    dom_string_isequal(type, corestring_dom_load)) {
 		/* No handler here, *try* and retrieve a handler from
 		 * the body
 		 */
 		duk_pop(CTX);
 		/* ... handlers */
 		exc = dom_html_document_get_body(doc, &body);
-		if (exc != DOM_NO_ERR) {
-			duk_pop(CTX);
-			dom_event_unref(evt);
-			qjsky_leave_thread(thread);
-			return true;
-		}
-		dukky_push_node(CTX, (struct dom_node *)body);
-		/* ... handlers bodynode */
-		if (dukky_get_current_value_of_event_handler(
-			    CTX, corestring_dom_load, body) == false) {
-			/* Unref the body, we don't need it any more */
+		if ((exc != DOM_NO_ERR) || (body == NULL)) {
+			duk_push_undefined(CTX);
+		} else {
+			dukky_push_node(CTX, (struct dom_node *)body);
+			/* ... handlers bodynode */
+			if (dukky_get_current_value_of_event_handler(
+				    CTX, corestring_dom_load, body) == false) {
+				/* ... handlers */
+				duk_push_undefined(CTX);
+			} else {
+				/* ... handlers handler bodynode */
+				duk_pop(CTX);
+			}
 			dom_node_unref(body);
-			/* ... handlers */
-			duk_pop(CTX);
-			dom_event_unref(evt);
-			qjsky_leave_thread(thread);
-			return true;
 		}
-		/* Unref the body, we don't need it any more */
-		dom_node_unref(body);
-		/* ... handlers handler bodynode */
-		duk_pop(CTX);
 	}
 	/* ... handlers handler */
-	duk_insert(CTX, -2);
-	/* ... handler handlers */
-	duk_pop(CTX);
+	duk_remove(CTX, -2);
 	/* ... handler */
-	duk_push_global_object(CTX);
-	/* ... handler Window */
-	dukky_push_event(CTX, evt);
-	/* ... handler Window event */
-	if (qjsky_pcall_method(CTX, 1) != 0) {
-		/* Failed to run the handler */
-		/* ... err */
-		NSLOG(qjsky, DEBUG,
-		      "OH NOES! An error running a handler.  Meh.");
-		qjsky_log_handler_error(CTX);
+	if (duk_is_undefined(CTX, -1)) {
+		duk_pop(CTX);
+		have_handler = false;
 	}
-	/* ... result */
-	duk_pop(CTX);
+
+	if (have_handler) {
+		/* ... handler */
+		duk_push_global_object(CTX);
+		/* ... handler Window */
+		dukky_push_event(CTX, evt);
+		/* ... handler Window event */
+		if (qjsky_pcall_method(CTX, 1) != 0) {
+			/* ... err */
+			qjsky_log_handler_error(CTX);
+		} else if (duk_is_boolean(CTX, -1) &&
+			   duk_to_boolean(CTX, -1) == 0) {
+			dom_event_prevent_default(evt);
+		}
+		/* ... result */
+		duk_pop(CTX);
+	}
+
 	/* ... */
+	qjsky_call_listeners(CTX, type, evt, phase, NULL);
+}
+
+
+/* exported interface documented in js.h */
+bool js_fire_event(jsthread *thread, const char *type, struct dom_document *doc, struct dom_node *target)
+{
+	dom_exception exc;
+	dom_event *evt;
+	dom_string *type_str;
+	bool bubbles;
+	bool success;
+
+	NSLOG(qjsky, DEBUG, "Event: %s (doc=%p, target=%p)", type, doc,
+	      target);
+
+	if (thread->pending_destroy) {
+		return true;
+	}
+
+	/* Of the events fired by the browser, DOMContentLoaded bubbles from
+	 * the Document to the Window.  The others are fired at the Window.
+	 */
+	bubbles = (strcmp(type, "DOMContentLoaded") == 0);
+
+	exc = dom_string_create((const uint8_t *)type, strlen(type), &type_str);
+	if (exc != DOM_NO_ERR) {
+		return true;
+	}
+
+	exc = dom_event_create(&evt);
+	if (exc != DOM_NO_ERR) {
+		dom_string_unref(type_str);
+		return true;
+	}
+	exc = dom_event_init(evt, type_str, bubbles, false);
+	if (exc != DOM_NO_ERR) {
+		dom_event_unref(evt);
+		dom_string_unref(type_str);
+		return true;
+	}
+
+	qjsky_enter_thread(thread);
+
+	if (target != NULL) {
+		/* listeners on nodes are called through libdom */
+		exc = dom_event_target_dispatch_event(target, evt, &success);
+		if (exc != DOM_NO_ERR) {
+			NSLOG(qjsky, DEBUG, "Unable to dispatch %s", type);
+		}
+	}
+
+	if ((target == NULL) || bubbles) {
+		qjsky_window_event(thread, evt, type_str, doc,
+				   (target == NULL) ? DOM_AT_TARGET :
+				   DOM_BUBBLING_PHASE);
+	}
+
 	js_event_cleanup(thread, evt);
 	dom_event_unref(evt);
+	dom_string_unref(type_str);
 	qjsky_leave_thread(thread);
+
 	return true;
 }
