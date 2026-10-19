@@ -1302,4 +1302,1101 @@
   }
   defineGlobal("TextEncoder", TextEncoder);
   defineGlobal("TextDecoder", TextDecoder);
+
+  /* URL and URLSearchParams following the WHATWG URL standard.
+   *
+   * \todo internationalised host names are not converted to punycode.
+   */
+
+  const specialPorts = {
+    "ftp:": 21, "file:": null, "http:": 80, "https:": 443, "ws:": 80, "wss:": 443
+  };
+  const isSpecial = (scheme) => Object.prototype.hasOwnProperty.call(specialPorts, scheme);
+
+  const hex = (c) => "%" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase();
+
+  /* Percent encode the characters of s for which test is true, and all
+   * non-ASCII characters as UTF-8.
+   */
+  const percentEncode = (s, test) => {
+    let out = "";
+    for (const ch of s) {
+      const c = ch.codePointAt(0);
+      if (c > 0x7e) {
+        try {
+          out += encodeURIComponent(ch);
+        } catch (e) {
+          out += "%EF%BF%BD"; /* lone surrogate */
+        }
+      } else if (c < 0x20 || test(ch)) {
+        out += hex(c);
+      } else {
+        out += ch;
+      }
+    }
+    return out;
+  };
+
+  const inSet = (chars) => (ch) => chars.indexOf(ch) >= 0;
+  const fragmentSet = inSet(" \"<>`");
+  const querySet = inSet(" \"#<>");
+  const specialQuerySet = inSet(" \"#<>'");
+  const pathSet = inSet(" \"#<>?^`{}");
+  const userinfoSet = inSet(" \"#<>?`{}/:;=@[\\]^|");
+
+  const percentDecode = (s) => {
+    const bytes = [];
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if (c === 0x25 && /^[0-9a-fA-F]{2}$/.test(s.substr(i + 1, 2))) {
+        bytes.push(parseInt(s.substr(i + 1, 2), 16));
+        i += 2;
+      } else if (c < 0x80) {
+        bytes.push(c);
+      } else {
+        const ch = String.fromCodePoint(s.codePointAt(i));
+        bytes.push(...new TextEncoder().encode(ch));
+        i += ch.length - 1;
+      }
+    }
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  };
+
+  class URLParseError extends TypeError {}
+
+  const fail = (why) => {
+    throw new URLParseError(why);
+  };
+
+  /* Punycode encoding of a label (RFC 3492) */
+  const punycode = (label) => {
+    const base = 36, tMin = 1, tMax = 26, skew = 38, damp = 700;
+    const points = Array.from(label, (ch) => ch.codePointAt(0));
+    let out = points.filter((c) => c < 0x80).map((c) => String.fromCharCode(c)).join("");
+    const basic = out.length;
+    let handled = basic;
+    if (basic > 0) {
+      out += "-";
+    }
+    const digit = (d) => String.fromCharCode(d + 22 + (d < 26 ? 75 : 0));
+    const adapt = (delta, count, first) => {
+      delta = first ? Math.floor(delta / damp) : delta >> 1;
+      delta += Math.floor(delta / count);
+      let k = 0;
+      while (delta > ((base - tMin) * tMax) >> 1) {
+        delta = Math.floor(delta / (base - tMin));
+        k += base;
+      }
+      return k + Math.floor((base - tMin + 1) * delta / (delta + skew));
+    };
+    let n = 128;
+    let delta = 0;
+    let bias = 72;
+    while (handled < points.length) {
+      const m = Math.min(...points.filter((c) => c >= n));
+      delta += (m - n) * (handled + 1);
+      n = m;
+      for (const c of points) {
+        if (c < n) {
+          delta++;
+        } else if (c === n) {
+          let q = delta;
+          for (let k = base; ; k += base) {
+            const t = k <= bias ? tMin : (k >= bias + tMax ? tMax : k - bias);
+            if (q < t) {
+              break;
+            }
+            out += digit(t + (q - t) % (base - t));
+            q = Math.floor((q - t) / (base - t));
+          }
+          out += digit(q);
+          bias = adapt(delta, handled + 1, handled === basic);
+          delta = 0;
+          handled++;
+        }
+      }
+      delta++;
+      n++;
+    }
+    return out;
+  };
+
+  /* Code points removed by UTS 46 mapping */
+  const ignoredInDomain = /[­͏᠋-᠍​-‍⁠︀-️﻿]/g;
+  /* Code points which make a domain invalid after mapping */
+  const disallowedInDomain = /[\x00-\x1f\x7f-\x9f�﷐-﷯\ud800-\udfff]|[￾￿]|[\ud83f\ud87f\ud8bf\ud8ff\ud93f\ud97f\ud9bf\ud9ff\uda3f\uda7f\udabf\udaff\udb3f\udb7f\udbbf\udbff][\udffe\udfff]/;
+  const forbiddenDomain = /[\x00-\x20#%/:<>?@[\\\]^|\x7f]/;
+  const forbiddenHost = /[\x00\t\n\r #/:<>?@[\\\]^|]/;
+
+  /* UTS 46 processing of a domain as needed by the URL standard: map
+   * case and compatibility forms, remove ignored characters, convert
+   * labels to punycode.  The full mapping table is not applied.
+   */
+  const domainToASCII = (domain) => {
+    let s = domain.toLowerCase().normalize("NFKC").toLowerCase();
+    s = s.replace(ignoredInDomain, "").replace(/[。．｡]/g, ".");
+    if (disallowedInDomain.test(s.replace(/[\ud800-\udbff][\udc00-\udfff]/g, (pair) =>
+      (pair.charCodeAt(1) & 0x3fe) === 0x3fe ? pair : "a"))) {
+      fail("invalid domain");
+    }
+    const labels = s.split(".").map((label) => {
+      if (/[^\x00-\x7f]/.test(label)) {
+        return "xn--" + punycode(label);
+      }
+      return label;
+    });
+    s = labels.join(".");
+    if (s === "") {
+      fail("empty domain");
+    }
+    return s;
+  };
+
+  /* Parse one part of an IPv4 address, returning NaN if invalid */
+  const ipv4Number = (part) => {
+    if (part === "") {
+      return NaN;
+    }
+    let radix = 10;
+    if (/^0x/i.test(part)) {
+      part = part.slice(2);
+      radix = 16;
+      if (part === "") {
+        return 0;
+      }
+    } else if (part.length > 1 && part.startsWith("0")) {
+      part = part.slice(1);
+      radix = 8;
+    }
+    const valid = radix === 16 ? /^[0-9a-f]+$/i : (radix === 8 ? /^[0-7]+$/ : /^[0-9]+$/);
+    if (!valid.test(part)) {
+      return NaN;
+    }
+    return parseInt(part, radix);
+  };
+
+  const endsInNumber = (host) => {
+    const parts = host.split(".");
+    if (parts[parts.length - 1] === "") {
+      if (parts.length === 1) {
+        return false;
+      }
+      parts.pop();
+    }
+    const last = parts[parts.length - 1];
+    return /^[0-9]+$/.test(last) || /^0x[0-9a-f]*$/i.test(last);
+  };
+
+  const parseIPv4 = (host) => {
+    const parts = host.split(".");
+    if (parts[parts.length - 1] === "" && parts.length > 1) {
+      parts.pop();
+    }
+    if (parts.length > 4) {
+      fail("invalid IPv4 address");
+    }
+    const nums = parts.map(ipv4Number);
+    if (nums.some((n) => isNaN(n))) {
+      fail("invalid IPv4 address");
+    }
+    for (let i = 0; i < nums.length - 1; i++) {
+      if (nums[i] > 255) {
+        fail("invalid IPv4 address");
+      }
+    }
+    if (nums[nums.length - 1] >= Math.pow(256, 5 - nums.length)) {
+      fail("invalid IPv4 address");
+    }
+    let value = nums[nums.length - 1];
+    for (let i = 0; i < nums.length - 1; i++) {
+      value += nums[i] * Math.pow(256, 3 - i);
+    }
+    return [3, 2, 1, 0].map((i) => Math.floor(value / Math.pow(256, i)) % 256).join(".");
+  };
+
+  /* Parse and serialise an IPv6 address, without its brackets */
+  const parseIPv6 = (input) => {
+    const pieces = [0, 0, 0, 0, 0, 0, 0, 0];
+    let index = 0;
+    let compress = null;
+    let p = 0;
+    const at = (i) => input.charAt(i);
+    const isHex = (c) => /^[0-9a-f]$/i.test(c);
+    if (at(p) === ":") {
+      if (at(p + 1) !== ":") {
+        fail("invalid IPv6 address");
+      }
+      p += 2;
+      index++;
+      compress = index;
+    }
+    while (p < input.length) {
+      if (index === 8) {
+        fail("invalid IPv6 address");
+      }
+      if (at(p) === ":") {
+        if (compress !== null) {
+          fail("invalid IPv6 address");
+        }
+        p++;
+        index++;
+        compress = index;
+        continue;
+      }
+      let value = 0;
+      let length = 0;
+      while (length < 4 && isHex(at(p))) {
+        value = value * 16 + parseInt(at(p), 16);
+        p++;
+        length++;
+      }
+      if (at(p) === ".") {
+        if (length === 0 || index > 6) {
+          fail("invalid IPv6 address");
+        }
+        p -= length;
+        let seen = 0;
+        while (p < input.length) {
+          let v4 = null;
+          if (seen > 0) {
+            if (at(p) === "." && seen < 4) {
+              p++;
+            } else {
+              fail("invalid IPv6 address");
+            }
+          }
+          if (!/^[0-9]$/.test(at(p))) {
+            fail("invalid IPv6 address");
+          }
+          while (/^[0-9]$/.test(at(p))) {
+            const n = parseInt(at(p), 10);
+            if (v4 === null) {
+              v4 = n;
+            } else if (v4 === 0) {
+              fail("invalid IPv6 address");
+            } else {
+              v4 = v4 * 10 + n;
+            }
+            if (v4 > 255) {
+              fail("invalid IPv6 address");
+            }
+            p++;
+          }
+          pieces[index] = pieces[index] * 256 + v4;
+          seen++;
+          if (seen === 2 || seen === 4) {
+            index++;
+          }
+        }
+        if (seen !== 4) {
+          fail("invalid IPv6 address");
+        }
+        break;
+      } else if (at(p) === ":") {
+        p++;
+        if (p >= input.length) {
+          fail("invalid IPv6 address");
+        }
+      } else if (p < input.length) {
+        fail("invalid IPv6 address");
+      }
+      pieces[index] = value;
+      index++;
+    }
+    if (compress !== null) {
+      let swaps = index - compress;
+      index = 7;
+      while (index !== 0 && swaps > 0) {
+        const tmp = pieces[compress + swaps - 1];
+        pieces[compress + swaps - 1] = pieces[index];
+        pieces[index] = tmp;
+        index--;
+        swaps--;
+      }
+    } else if (index !== 8) {
+      fail("invalid IPv6 address");
+    }
+
+    /* serialise, compressing the first longest run of two or more zeros */
+    let best = -1;
+    let bestLength = 1;
+    for (let i = 0; i < 8; i++) {
+      let j = i;
+      while (j < 8 && pieces[j] === 0) {
+        j++;
+      }
+      if (j - i > bestLength) {
+        best = i;
+        bestLength = j - i;
+      }
+    }
+    let out = "";
+    let ignoring = false;
+    for (let i = 0; i < 8; i++) {
+      if (ignoring && pieces[i] === 0) {
+        continue;
+      }
+      ignoring = false;
+      if (i === best) {
+        out += i === 0 ? "::" : ":";
+        ignoring = true;
+        continue;
+      }
+      out += pieces[i].toString(16);
+      if (i !== 7) {
+        out += ":";
+      }
+    }
+    return "[" + out + "]";
+  };
+
+  const parseHost = (input, special) => {
+    if (input.startsWith("[")) {
+      if (!input.endsWith("]")) {
+        fail("invalid IPv6 address");
+      }
+      return parseIPv6(input.slice(1, -1));
+    }
+    if (!special) {
+      if (forbiddenHost.test(input)) {
+        fail("invalid host");
+      }
+      return percentEncode(input, () => false);
+    }
+    const domain = percentDecode(input);
+    const ascii = domainToASCII(domain);
+    if (forbiddenDomain.test(ascii)) {
+      fail("invalid host");
+    }
+    if (endsInNumber(ascii)) {
+      return parseIPv4(ascii);
+    }
+    return ascii;
+  };
+
+  const isSingleDot = (s) => s === "." || s.toLowerCase() === "%2e";
+  const isDoubleDot = (s) => /^(\.|%2e)(\.|%2e)$/i.test(s);
+  const isDriveLetter = (s) => /^[a-zA-Z][:|]$/.test(s);
+  const isNormalizedDrive = (s) => /^[a-zA-Z]:$/.test(s);
+  const startsWithDrive = (s) => /^[a-zA-Z][:|]([/\\?#]|$)/.test(s);
+
+  const shortenPath = (record) => {
+    if (record.scheme === "file:" && record.path.length === 1 &&
+        isNormalizedDrive(record.path[0])) {
+      return;
+    }
+    record.path.pop();
+  };
+
+  /* Append the segments of a relative path to a record's path */
+  const parsePath = (record, input) => {
+    const special = isSpecial(record.scheme);
+    const segments = special ? input.split(/[/\\]/) : input.split("/");
+    for (let i = 0; i < segments.length; i++) {
+      let seg = segments[i];
+      const last = i === segments.length - 1;
+      if (isDoubleDot(seg)) {
+        shortenPath(record);
+        if (last) {
+          record.path.push("");
+        }
+      } else if (isSingleDot(seg)) {
+        if (last) {
+          record.path.push("");
+        }
+      } else {
+        if (record.scheme === "file:" && record.path.length === 0 && isDriveLetter(seg)) {
+          seg = seg.charAt(0) + ":";
+        }
+        record.path.push(percentEncode(seg, pathSet));
+      }
+    }
+  };
+
+  /* Split off the query and fragment of input into record */
+  const parseQueryFragment = (record, input) => {
+    let rest = input;
+    const hashAt = rest.indexOf("#");
+    if (hashAt >= 0) {
+      record.fragment = percentEncode(rest.slice(hashAt + 1), fragmentSet);
+      rest = rest.slice(0, hashAt);
+    }
+    const queryAt = rest.indexOf("?");
+    if (queryAt >= 0) {
+      record.query = percentEncode(rest.slice(queryAt + 1),
+        isSpecial(record.scheme) ? specialQuerySet : querySet);
+      rest = rest.slice(0, queryAt);
+    }
+    return rest;
+  };
+
+  /* Parse an authority (userinfo, host and port) returning what follows */
+  const parseAuthority = (record, input) => {
+    const special = isSpecial(record.scheme);
+    const end = input.search(special ? /[/\\?#]/ : /[/?#]/);
+    let authority = end < 0 ? input : input.slice(0, end);
+    const rest = end < 0 ? "" : input.slice(end);
+    const at = authority.lastIndexOf("@");
+    if (at >= 0) {
+      const userinfo = authority.slice(0, at);
+      authority = authority.slice(at + 1);
+      if (authority === "") {
+        fail("credentials without a host");
+      }
+      const colon = userinfo.indexOf(":");
+      record.username = percentEncode(colon < 0 ? userinfo : userinfo.slice(0, colon), userinfoSet);
+      record.password = colon < 0 ? "" : percentEncode(userinfo.slice(colon + 1), userinfoSet);
+    }
+    const m = /^(\[[^\]]*\]|[^:]*)(?::(.*))?$/.exec(authority);
+    if (m === null) {
+      fail("invalid host");
+    }
+    const host = m[1];
+    if (m[2] !== undefined) {
+      if (host === "") {
+        fail("port without a host");
+      }
+      if (m[2] !== "") {
+        if (!/^[0-9]+$/.test(m[2]) || parseInt(m[2], 10) > 65535) {
+          fail("invalid port");
+        }
+        record.port = parseInt(m[2], 10);
+        if (record.port === specialPorts[record.scheme]) {
+          record.port = null;
+        }
+      }
+    }
+    if (host === "" && special) {
+      fail("missing host");
+    }
+    record.host = host === "" ? "" : parseHost(host, special);
+    return rest;
+  };
+
+  /* Parse the path, query and fragment following an authority */
+  const parseHierarchical = (record, input) => {
+    const special = isSpecial(record.scheme);
+    const slash = special ? /^[/\\]/ : /^\//;
+    const rest = parseQueryFragment(record, input);
+    if (rest !== "") {
+      parsePath(record, slash.test(rest) ? rest.slice(1) : rest);
+    } else if (special) {
+      record.path.push("");
+    }
+  };
+
+  const newRecord = (scheme) => ({
+    scheme, username: "", password: "", host: null, port: null,
+    path: [], opaque: null, query: null, fragment: null
+  });
+
+  /* The file state of the URL parser, with an optional file base */
+  const parseFile = (input, base) => {
+    const record = newRecord("file:");
+    record.host = "";
+    if (/^[/\\]{2}/.test(input)) {
+      /* file host */
+      const after = input.slice(2);
+      const end = after.search(/[/\\?#]/);
+      const buffer = end < 0 ? after : after.slice(0, end);
+      if (isDriveLetter(buffer)) {
+        /* a drive letter is part of the path, not a host */
+        parseHierarchical(record, "/" + after);
+        return record;
+      }
+      if (buffer !== "") {
+        const host = parseHost(buffer, true);
+        record.host = host === "localhost" ? "" : host;
+      }
+      parseHierarchical(record, end < 0 ? "" : after.slice(end));
+      return record;
+    }
+    if (/^[/\\]/.test(input)) {
+      /* file slash */
+      if (base !== null) {
+        record.host = base.host;
+        if (!startsWithDrive(input.slice(1)) && base.path.length > 0 &&
+            isNormalizedDrive(base.path[0])) {
+          record.path.push(base.path[0]);
+        }
+      }
+      parseHierarchical(record, input);
+      return record;
+    }
+    if (base !== null) {
+      record.host = base.host;
+      record.path = base.path.slice();
+      record.query = base.query;
+      if (input === "") {
+        return record;
+      }
+      if (input.startsWith("#")) {
+        record.fragment = percentEncode(input.slice(1), fragmentSet);
+        return record;
+      }
+      record.query = null;
+      if (input.startsWith("?")) {
+        parseQueryFragment(record, input);
+        return record;
+      }
+      if (startsWithDrive(input)) {
+        record.path = [];
+      } else {
+        shortenPath(record);
+      }
+    }
+    const rest = parseQueryFragment(record, input);
+    parsePath(record, rest);
+    return record;
+  };
+
+  /* Parse an opaque path, such as that of a mailto: or data: URL */
+  const parseOpaque = (record, input) => {
+    let rest = input;
+    let trailing = false;
+    const hashAt = rest.indexOf("#");
+    if (hashAt >= 0) {
+      record.fragment = percentEncode(rest.slice(hashAt + 1), fragmentSet);
+      rest = rest.slice(0, hashAt);
+      trailing = true;
+    }
+    const queryAt = rest.indexOf("?");
+    if (queryAt >= 0) {
+      record.query = percentEncode(rest.slice(queryAt + 1), querySet);
+      rest = rest.slice(0, queryAt);
+      trailing = true;
+    }
+    let opaque = percentEncode(rest, () => false);
+    if (trailing && opaque.endsWith(" ")) {
+      opaque = opaque.slice(0, -1) + "%20";
+    }
+    record.opaque = opaque;
+    return record;
+  };
+
+  const parseURL = (input, base) => {
+    input = String(input).replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").replace(/[\t\n\r]/g, "");
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(input);
+    if (m) {
+      const scheme = m[1].toLowerCase() + ":";
+      let rest = input.slice(m[0].length);
+      if (scheme === "file:") {
+        return parseFile(rest, base !== null && base.scheme === "file:" ? base : null);
+      }
+      const record = newRecord(scheme);
+      const special = isSpecial(scheme);
+      if (special && base !== null && base.scheme === scheme && !/^[/\\]{2}/.test(rest)) {
+        /* a relative reference with the scheme of the base */
+        return resolve(rest, base);
+      }
+      if (special) {
+        parseHierarchical(record, parseAuthority(record, rest.replace(/^[/\\]*/, "")));
+        return record;
+      }
+      if (rest.startsWith("//")) {
+        parseHierarchical(record, parseAuthority(record, rest.slice(2)));
+        return record;
+      }
+      if (rest.startsWith("/")) {
+        parseHierarchical(record, rest);
+        return record;
+      }
+      return parseOpaque(record, rest);
+    }
+    if (base === null) {
+      fail("invalid URL");
+    }
+    return resolve(input, base);
+  };
+
+  const copyRecord = (base) => Object.assign(newRecord(base.scheme), base,
+    { path: base.path.slice(), query: null, fragment: null });
+
+  /* Resolve a relative reference against a base */
+  const resolve = (input, base) => {
+    if (base.opaque !== null) {
+      if (!input.startsWith("#")) {
+        fail("cannot resolve against an opaque URL");
+      }
+      const record = copyRecord(base);
+      record.query = base.query;
+      record.fragment = percentEncode(input.slice(1), fragmentSet);
+      return record;
+    }
+    if (base.scheme === "file:") {
+      return parseFile(input, base);
+    }
+    const special = isSpecial(base.scheme);
+    const slash = special ? /^[/\\]/ : /^\//;
+    if (special && /^[/\\]{2}/.test(input)) {
+      const record = newRecord(base.scheme);
+      parseHierarchical(record, parseAuthority(record, input.replace(/^[/\\]*/, "")));
+      return record;
+    }
+    if (!special && input.startsWith("//")) {
+      const record = newRecord(base.scheme);
+      parseHierarchical(record, parseAuthority(record, input.slice(2)));
+      return record;
+    }
+    const record = copyRecord(base);
+    if (input === "") {
+      record.query = base.query;
+      return record;
+    }
+    if (input.startsWith("#")) {
+      record.query = base.query;
+      record.fragment = percentEncode(input.slice(1), fragmentSet);
+      return record;
+    }
+    if (input.startsWith("?")) {
+      parseQueryFragment(record, input);
+      return record;
+    }
+    if (slash.test(input)) {
+      record.path = [];
+    } else {
+      shortenPath(record);
+    }
+    const rest = parseQueryFragment(record, input);
+    parsePath(record, rest.replace(slash, ""));
+    return record;
+  };
+
+  const serializePath = (record) => {
+    if (record.opaque !== null) {
+      return record.opaque;
+    }
+    return record.path.length > 0 ? "/" + record.path.join("/") : "";
+  };
+
+  const serializeHost = (record) => {
+    let out = "";
+    if (record.username !== "" || record.password !== "") {
+      out += record.username + (record.password !== "" ? ":" + record.password : "") + "@";
+    }
+    out += record.host;
+    if (record.port !== null) {
+      out += ":" + record.port;
+    }
+    return out;
+  };
+
+  const serializeURL = (record, excludeFragment) => {
+    let out = record.scheme;
+    if (record.host !== null) {
+      out += "//" + serializeHost(record);
+    } else if (record.opaque === null && record.path.length > 1 && record.path[0] === "") {
+      /* stop the path being read as an authority */
+      out += "/.";
+    }
+    out += serializePath(record);
+    if (record.query !== null) {
+      out += "?" + record.query;
+    }
+    if (!excludeFragment && record.fragment !== null) {
+      out += "#" + record.fragment;
+    }
+    return out;
+  };
+
+  /* application/x-www-form-urlencoded */
+  const formEncode = (s) => percentEncode(String(s).replace(/\r\n|\r|\n/g, "\r\n"),
+    (ch) => !/[A-Za-z0-9*\-._ ]/.test(ch)).replace(/ /g, "+");
+  const formDecode = (s) => percentDecode(s.replace(/\+/g, " "));
+  const parseForm = (s) => s.split("&").filter((p) => p !== "").map((p) => {
+    const eq = p.indexOf("=");
+    return eq < 0 ? [formDecode(p), ""] : [formDecode(p.slice(0, eq)), formDecode(p.slice(eq + 1))];
+  });
+
+  /* Functions which reach the private state of URL and URLSearchParams,
+   * set by their static blocks.
+   */
+  let linkParams;
+  let relistParams;
+  let setURLQuery;
+
+  class URLSearchParams {
+    #list = [];
+    #url = null;
+
+    static {
+      linkParams = (params, url, query) => {
+        params.#url = url;
+        params.#list = query === null ? [] : parseForm(query);
+      };
+      relistParams = (params, query) => {
+        params.#list = query === null ? [] : parseForm(query);
+      };
+    }
+
+    constructor(init = "") {
+      if (typeof init === "object" && init !== null) {
+        if (typeof init[Symbol.iterator] === "function") {
+          for (const pair of init) {
+            const items = Array.from(pair);
+            if (items.length !== 2) {
+              throw new TypeError("URLSearchParams: each pair must have two items");
+            }
+            this.#list.push([String(items[0]), String(items[1])]);
+          }
+        } else {
+          for (const key of Object.keys(init)) {
+            this.#list.push([key, String(init[key])]);
+          }
+        }
+      } else {
+        const s = String(init);
+        this.#list = parseForm(s.startsWith("?") ? s.slice(1) : s);
+      }
+    }
+
+    #update() {
+      if (this.#url !== null) {
+        const s = this.toString();
+        setURLQuery(this.#url, s === "" ? null : s);
+      }
+    }
+
+    get size() { return this.#list.length; }
+    append(name, value) {
+      this.#list.push([String(name), String(value)]);
+      this.#update();
+    }
+    delete(name, value) {
+      name = String(name);
+      this.#list = this.#list.filter(([n, v]) => n !== name || (value !== undefined && v !== String(value)));
+      this.#update();
+    }
+    get(name) {
+      name = String(name);
+      const pair = this.#list.find(([n]) => n === name);
+      return pair ? pair[1] : null;
+    }
+    getAll(name) {
+      name = String(name);
+      return this.#list.filter(([n]) => n === name).map(([, v]) => v);
+    }
+    has(name, value) {
+      name = String(name);
+      return this.#list.some(([n, v]) => n === name && (value === undefined || v === String(value)));
+    }
+    set(name, value) {
+      name = String(name);
+      value = String(value);
+      const at = this.#list.findIndex(([n]) => n === name);
+      if (at < 0) {
+        this.#list.push([name, value]);
+      } else {
+        this.#list[at][1] = value;
+        this.#list = this.#list.filter(([n], i) => n !== name || i === at);
+      }
+      this.#update();
+    }
+    sort() {
+      this.#list = this.#list.map((p, i) => [p, i]).sort(([a, ai], [b, bi]) =>
+        a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : ai - bi).map(([p]) => p);
+      this.#update();
+    }
+    forEach(callback, thisArg) {
+      for (const [n, v] of this.#list.slice()) {
+        callback.call(thisArg, v, n, this);
+      }
+    }
+    *entries() {
+      for (const [n, v] of this.#list.slice()) {
+        yield [n, v];
+      }
+    }
+    *keys() {
+      for (const [n] of this.#list.slice()) {
+        yield n;
+      }
+    }
+    *values() {
+      for (const [, v] of this.#list.slice()) {
+        yield v;
+      }
+    }
+    [Symbol.iterator]() {
+      return this.entries();
+    }
+    toString() {
+      return this.#list.map(([n, v]) => formEncode(n) + "=" + formEncode(v)).join("&");
+    }
+    get [Symbol.toStringTag]() {
+      return "URLSearchParams";
+    }
+  }
+
+  const stripTabs = (value) => String(value).replace(/[\t\n\r]/g, "");
+
+  /* Set the port from the leading digits of s, ignoring the rest */
+  const setPort = (r, s) => {
+    const digits = /^[0-9]*/.exec(s)[0];
+    if (digits === "") {
+      return;
+    }
+    const port = parseInt(digits, 10);
+    if (port > 65535) {
+      return;
+    }
+    r.port = port === specialPorts[r.scheme] ? null : port;
+  };
+
+  /* The host and hostname setters, which parse with a host state
+   * override: an invalid port leaves the new host set.
+   */
+  const setHost = (r, value, hostnameOnly) => {
+    if (r.opaque !== null) {
+      return;
+    }
+    const v = stripTabs(value);
+    const special = isSpecial(r.scheme);
+    const end = v.search(special ? /[/\\?#]/ : /[/?#]/);
+    const buffer = end < 0 ? v : v.slice(0, end);
+    if (r.scheme === "file:") {
+      if (isDriveLetter(buffer)) {
+        return;
+      }
+      try {
+        const host = buffer === "" ? "" : parseHost(buffer, true);
+        r.host = host === "localhost" ? "" : host;
+      } catch (e) {
+        /* invalid hosts are ignored */
+      }
+      return;
+    }
+    /* split at the first colon outside an IPv6 address */
+    let colon = -1;
+    let inBrackets = false;
+    for (let i = 0; i < buffer.length; i++) {
+      const c = buffer.charAt(i);
+      if (c === "[") {
+        inBrackets = true;
+      } else if (c === "]") {
+        inBrackets = false;
+      } else if (c === ":" && !inBrackets) {
+        colon = i;
+        break;
+      }
+    }
+    if (colon >= 0 && hostnameOnly) {
+      return;
+    }
+    const hostPart = colon < 0 ? buffer : buffer.slice(0, colon);
+    if (hostPart === "") {
+      if (special || colon >= 0 || r.username !== "" || r.password !== "" || r.port !== null) {
+        return;
+      }
+      r.host = "";
+      return;
+    }
+    try {
+      r.host = parseHost(hostPart, special);
+    } catch (e) {
+      return;
+    }
+    if (colon >= 0) {
+      setPort(r, buffer.slice(colon + 1));
+    }
+  };
+
+  class URL {
+    #record;
+    #params;
+
+    constructor(url, base) {
+      let baseRecord = null;
+      if (base !== undefined) {
+        baseRecord = (base instanceof URL) ? base.#record : parseURL(String(base), null);
+      }
+      this.#record = parseURL(String(url), baseRecord);
+      this.#params = new URLSearchParams();
+      linkParams(this.#params, this, this.#record.query);
+    }
+
+    static canParse(url, base) {
+      try {
+        new URL(url, base);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    static parse(url, base) {
+      try {
+        return new URL(url, base);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    static {
+      setURLQuery = (url, query) => {
+        url.#record.query = query;
+      };
+    }
+
+    get href() { return serializeURL(this.#record, false); }
+    set href(value) {
+      this.#record = parseURL(String(value), null);
+      relistParams(this.#params, this.#record.query);
+    }
+    toString() { return this.href; }
+    toJSON() { return this.href; }
+
+    get origin() {
+      const r = this.#record;
+      if (r.scheme === "blob:" && r.opaque !== null) {
+        try {
+          const inner = new URL(r.opaque);
+          return (inner.protocol === "http:" || inner.protocol === "https:") ? inner.origin : "null";
+        } catch (e) {
+          return "null";
+        }
+      }
+      if (!isSpecial(r.scheme) || r.scheme === "file:") {
+        return "null";
+      }
+      return r.scheme + "//" + r.host + (r.port !== null ? ":" + r.port : "");
+    }
+
+    get protocol() { return this.#record.scheme; }
+    set protocol(value) {
+      const m = /^([a-zA-Z][a-zA-Z0-9+.-]*)(?::|$)/.exec(stripTabs(value));
+      if (!m) {
+        return;
+      }
+      const scheme = m[1].toLowerCase() + ":";
+      const r = this.#record;
+      if (isSpecial(scheme) !== isSpecial(r.scheme) ||
+          (scheme === "file:" && (r.username !== "" || r.password !== "" || r.port !== null)) ||
+          (r.scheme === "file:" && r.host === "")) {
+        return;
+      }
+      r.scheme = scheme;
+      if (r.port === specialPorts[scheme]) {
+        r.port = null;
+      }
+    }
+
+    get username() { return this.#record.username; }
+    set username(value) {
+      const r = this.#record;
+      if (r.host === null || r.host === "" || r.scheme === "file:") {
+        return;
+      }
+      r.username = percentEncode(String(value), userinfoSet);
+    }
+
+    get password() { return this.#record.password; }
+    set password(value) {
+      const r = this.#record;
+      if (r.host === null || r.host === "" || r.scheme === "file:") {
+        return;
+      }
+      r.password = percentEncode(String(value), userinfoSet);
+    }
+
+    get host() {
+      const r = this.#record;
+      if (r.host === null) {
+        return "";
+      }
+      return r.host + (r.port !== null ? ":" + r.port : "");
+    }
+    set host(value) {
+      setHost(this.#record, value, false);
+    }
+
+    get hostname() {
+      const host = this.#record.host;
+      return host === null ? "" : host;
+    }
+    set hostname(value) {
+      setHost(this.#record, value, true);
+    }
+
+    get port() {
+      const port = this.#record.port;
+      return port === null ? "" : String(port);
+    }
+    set port(value) {
+      const r = this.#record;
+      if (r.host === null || r.host === "" || r.scheme === "file:") {
+        return;
+      }
+      if (String(value) === "") {
+        r.port = null;
+        return;
+      }
+      setPort(r, stripTabs(value));
+    }
+
+    get pathname() { return serializePath(this.#record); }
+    set pathname(value) {
+      const r = this.#record;
+      if (r.opaque !== null) {
+        return;
+      }
+      let s = stripTabs(value);
+      const special = isSpecial(r.scheme);
+      r.path = [];
+      if (s === "" && !special) {
+        /* a path without a host must keep its leading slash */
+        if (r.host === null) {
+          r.path.push("");
+        }
+        return;
+      }
+      if (special ? /^[/\\]/.test(s) : s.startsWith("/")) {
+        s = s.slice(1);
+      }
+      parsePath(r, s);
+    }
+
+    get search() {
+      const query = this.#record.query;
+      return query === null || query === "" ? "" : "?" + query;
+    }
+    set search(value) {
+      const r = this.#record;
+      let s = stripTabs(value);
+      if (s === "") {
+        r.query = null;
+      } else {
+        if (s.startsWith("?")) {
+          s = s.slice(1);
+        }
+        r.query = percentEncode(s, isSpecial(r.scheme) ? specialQuerySet : querySet);
+      }
+      relistParams(this.#params, r.query);
+    }
+
+    get searchParams() { return this.#params; }
+
+    get hash() {
+      const fragment = this.#record.fragment;
+      return fragment === null || fragment === "" ? "" : "#" + fragment;
+    }
+    set hash(value) {
+      let s = stripTabs(value);
+      if (s === "") {
+        this.#record.fragment = null;
+        return;
+      }
+      if (s.startsWith("#")) {
+        s = s.slice(1);
+      }
+      this.#record.fragment = percentEncode(s, fragmentSet);
+    }
+
+    get [Symbol.toStringTag]() {
+      return "URL";
+    }
+  }
+
+  defineGlobal("URL", URL);
+  defineGlobal("URLSearchParams", URLSearchParams);
 })();
