@@ -1,0 +1,16 @@
+QuickJS-ng JavaScript engine
+============================
+
+These files are an unmodified copy of the engine core of QuickJS-ng,
+released under the MIT licence (see LICENSE).
+
+  Upstream: https://github.com/quickjs-ng/quickjs
+  Version:  v0.17.0
+  Commit:   6d46d07d04041b40f4f49eaa7fdebe44c314c699
+
+Only the engine is included: quickjs-libc, the qjs/qjsc tools, tests
+and the build files are omitted.
+
+To update, copy the same set of files from a newer upstream release
+and change the version details above. Do not edit these files;
+NetSurf specific configuration belongs in the parent directory.
