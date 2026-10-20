@@ -22,6 +22,24 @@
 
   const global = globalThis;
 
+  /* Native layout queries the binding provides for this file only */
+  const native = {
+    /* [x, y, width, height, clientWidth, clientHeight, scrollWidth,
+     * scrollHeight] of an element in document coordinates, or null
+     */
+    geometry: global.__netsurf_geometry,
+    /* [width, height, scrollX, scrollY] of the viewport */
+    viewport: global.__netsurf_viewport,
+    /* computed value of a css property of an element, or undefined */
+    style: global.__netsurf_style,
+    /* scroll the window to a document position */
+    scrollTo: global.__netsurf_scroll_to
+  };
+  for (const name of ["__netsurf_geometry", "__netsurf_viewport",
+                      "__netsurf_style", "__netsurf_scroll_to"]) {
+    delete global[name];
+  }
+
   /* Define methods on a prototype as WebIDL operations are */
   const defineMethods = (target, methods) => {
     for (const name of Object.keys(methods)) {
@@ -99,32 +117,59 @@
     get closed() { return false; }
   });
 
-  /** \todo the viewport size should come from the browser window */
-  const viewport = { width: 1024, height: 768 };
+  /* The viewport, from the browser window */
+  const viewport = {
+    get width() { return native.viewport()[0]; },
+    get height() { return native.viewport()[1]; },
+    get scrollX() { return native.viewport()[2]; },
+    get scrollY() { return native.viewport()[3]; }
+  };
   defineAccessors(global, {
     get innerWidth() { return viewport.width; },
     get innerHeight() { return viewport.height; },
     get outerWidth() { return viewport.width; },
     get outerHeight() { return viewport.height; },
     get devicePixelRatio() { return 1; },
-    get scrollX() { return 0; },
-    get scrollY() { return 0; },
-    get pageXOffset() { return 0; },
-    get pageYOffset() { return 0; },
+    get scrollX() { return viewport.scrollX; },
+    get scrollY() { return viewport.scrollY; },
+    get pageXOffset() { return viewport.scrollX; },
+    get pageYOffset() { return viewport.scrollY; },
     get screenX() { return 0; },
     get screenY() { return 0; }
   });
 
+  /** \todo the screen size should come from the front end */
   defineGlobal("screen", Object.freeze({
-    width: viewport.width, height: viewport.height,
-    availWidth: viewport.width, availHeight: viewport.height,
+    get width() { return viewport.width; },
+    get height() { return viewport.height; },
+    get availWidth() { return viewport.width; },
+    get availHeight() { return viewport.height; },
     colorDepth: 24, pixelDepth: 24
   }));
 
+  /* Arguments of scroll methods: (x, y) or ({ left, top }) */
+  const scrollArgs = (args, current) => {
+    if (args.length === 1 && typeof args[0] === "object" && args[0] !== null) {
+      const o = args[0];
+      return [o.left === undefined ? current[0] : Number(o.left),
+              o.top === undefined ? current[1] : Number(o.top)];
+    }
+    return [Number(args[0]) || 0, Number(args[1]) || 0];
+  };
+
   defineMethods(global, {
-    scroll() {},
-    scrollTo() {},
-    scrollBy() {},
+    scroll(...args) {
+      const [x, y] = scrollArgs(args, [viewport.scrollX, viewport.scrollY]);
+      native.scrollTo(x, y);
+    },
+    scrollTo(...args) {
+      const [x, y] = scrollArgs(args, [viewport.scrollX, viewport.scrollY]);
+      native.scrollTo(x, y);
+    },
+    scrollBy(...args) {
+      const [x, y] = scrollArgs(args, [0, 0]);
+      native.scrollTo(viewport.scrollX + x, viewport.scrollY + y);
+    },
     focus() {},
     blur() {}
   });
@@ -466,13 +511,36 @@
       insertAdjacent(this, where, fragment);
     },
     getBoundingClientRect() {
-      /** \todo report the layout position once it is available */
-      return new DOMRect(0, 0, 0, 0);
+      const g = native.geometry(this);
+      if (g === null) {
+        return new DOMRect(0, 0, 0, 0);
+      }
+      return new DOMRect(g[0] - viewport.scrollX, g[1] - viewport.scrollY, g[2], g[3]);
     },
     getClientRects() {
-      return [];
+      return native.geometry(this) === null ? [] : [this.getBoundingClientRect()];
     },
-    scrollIntoView() {},
+    scrollIntoView(arg) {
+      const g = native.geometry(this);
+      if (g === null) {
+        return;
+      }
+      const block = (typeof arg === "object" && arg !== null) ? arg.block :
+        (arg === false ? "end" : "start");
+      let y = g[1];
+      if (block === "end") {
+        y = g[1] + g[3] - viewport.height;
+      } else if (block === "center") {
+        y = g[1] + (g[3] - viewport.height) / 2;
+      } else if (block === "nearest") {
+        const top = viewport.scrollY;
+        if (g[1] >= top && g[1] + g[3] <= top + viewport.height) {
+          return;
+        }
+      }
+      native.scrollTo(viewport.scrollX, y);
+    },
+    /** \todo scrolling within elements is not supported */
     scroll() {},
     scrollTo() {},
     scrollBy() {}
@@ -502,26 +570,74 @@
     throw domError("SyntaxError", `'${where}' is not a valid position`);
   };
 
-  /* Layout dependent geometry is not yet available */
-  const zero = () => 0;
+  /* Element geometry from the layout */
+
+  const isRoot = (el) => el.ownerDocument !== null && el === el.ownerDocument.documentElement;
+  const isBody = (el) => el.ownerDocument !== null && el === el.ownerDocument.body;
+  /* The element whose scrolling is the window's */
+  const scrollsWindow = (el) => isRoot(el) || isBody(el);
+  const geometryValue = (el, index) => {
+    const g = native.geometry(el);
+    return g === null ? 0 : g[index];
+  };
+  const pxValue = (el, property) => parseInt(native.style(el, property), 10) || 0;
+
   defineAccessors(Element.prototype, {
-    get clientWidth() { return 0; },
-    get clientHeight() { return 0; },
-    get clientTop() { return 0; },
-    get clientLeft() { return 0; },
-    get scrollWidth() { return 0; },
-    get scrollHeight() { return 0; },
-    get scrollTop() { return 0; },
-    set scrollTop(v) {},
-    get scrollLeft() { return 0; },
-    set scrollLeft(v) {}
+    get clientWidth() { return isRoot(this) ? viewport.width : geometryValue(this, 4); },
+    get clientHeight() { return isRoot(this) ? viewport.height : geometryValue(this, 5); },
+    get clientTop() { return pxValue(this, "border-top-width"); },
+    get clientLeft() { return pxValue(this, "border-left-width"); },
+    get scrollWidth() { return geometryValue(this, 6); },
+    get scrollHeight() { return geometryValue(this, 7); },
+    get scrollTop() { return scrollsWindow(this) ? viewport.scrollY : 0; },
+    set scrollTop(v) {
+      if (scrollsWindow(this)) {
+        native.scrollTo(viewport.scrollX, Number(v) || 0);
+      }
+    },
+    get scrollLeft() { return scrollsWindow(this) ? viewport.scrollX : 0; },
+    set scrollLeft(v) {
+      if (scrollsWindow(this)) {
+        native.scrollTo(Number(v) || 0, viewport.scrollY);
+      }
+    }
   });
+
+  /* The nearest positioned ancestor, or the body */
+  const offsetParentOf = (el) => {
+    if (native.geometry(el) === null || isRoot(el) || isBody(el) ||
+        native.style(el, "position") === "fixed") {
+      return null;
+    }
+    for (let p = el.parentElement; p !== null; p = p.parentElement) {
+      if (isBody(p) || native.style(p, "position") !== "static") {
+        return p;
+      }
+    }
+    return null;
+  };
+
+  /* Offset of an element from its offset parent's padding edge */
+  const offsetOf = (el, index) => {
+    const g = native.geometry(el);
+    if (g === null) {
+      return 0;
+    }
+    const parent = offsetParentOf(el);
+    if (parent === null || isBody(parent)) {
+      return g[index];
+    }
+    const pg = native.geometry(parent);
+    const border = pxValue(parent, index === 0 ? "border-left-width" : "border-top-width");
+    return g[index] - pg[index] - border;
+  };
+
   defineAccessors(HTMLElement.prototype, {
-    get offsetWidth() { return zero(); },
-    get offsetHeight() { return zero(); },
-    get offsetTop() { return zero(); },
-    get offsetLeft() { return zero(); },
-    get offsetParent() { return null; }
+    get offsetWidth() { return geometryValue(this, 2); },
+    get offsetHeight() { return geometryValue(this, 3); },
+    get offsetTop() { return offsetOf(this, 1); },
+    get offsetLeft() { return offsetOf(this, 0); },
+    get offsetParent() { return offsetParentOf(this); }
   });
 
   class DOMRectReadOnly {
@@ -934,23 +1050,292 @@
     }
   }));
 
-  /** \todo return the computed style once NetSurf can provide it */
+  /* CSS declarations: element.style and getComputedStyle()
+   *
+   * Inline styles are read from and written to the style attribute, so
+   * changes reach the layout through the box tree rebuild.  Computed
+   * styles come from the layout.  Only properties NetSurf supports are
+   * recognised, so feature detection reflects what it can render.
+   */
+
+  const supportedProperties = new Set((
+    "align-content align-items align-self azimuth background " +
+    "background-attachment background-color background-image " +
+    "background-position background-repeat border border-bottom " +
+    "border-bottom-color border-bottom-style border-bottom-width " +
+    "border-collapse border-color border-left border-left-color " +
+    "border-left-style border-left-width border-right border-right-color " +
+    "border-right-style border-right-width border-spacing border-style " +
+    "border-top border-top-color border-top-style border-top-width " +
+    "border-width bottom box-sizing break-after break-before break-inside " +
+    "caption-side clear clip color columns column-count column-fill " +
+    "column-gap column-rule column-rule-color column-rule-style " +
+    "column-rule-width column-span column-width content counter-increment " +
+    "counter-reset cue cue-after cue-before cursor direction display " +
+    "elevation empty-cells fill-opacity flex flex-basis flex-direction " +
+    "flex-flow flex-grow flex-shrink flex-wrap float font font-family " +
+    "font-size font-style font-variant font-weight height justify-content " +
+    "left letter-spacing line-height list-style list-style-image " +
+    "list-style-position list-style-type margin margin-bottom margin-left " +
+    "margin-right margin-top max-height max-width min-height min-width " +
+    "opacity order orphans outline outline-color outline-style " +
+    "outline-width overflow overflow-x overflow-y padding padding-bottom " +
+    "padding-left padding-right padding-top page-break-after " +
+    "page-break-before page-break-inside pause pause-after pause-before " +
+    "pitch-range pitch play-during position quotes richness right " +
+    "speak-header speak-numeral speak-punctuation speak speech-rate " +
+    "stress stroke-opacity table-layout text-align text-decoration " +
+    "text-indent text-transform top unicode-bidi vertical-align " +
+    "visibility voice-family volume white-space widows width word-spacing " +
+    "writing-mode z-index"
+  ).split(" "));
+
+  /* Convert a scripting property name to a css property name, or null if
+   * it is not a supported property.
+   */
+  const cssName = (prop) => {
+    let name;
+    if (prop === "cssFloat") {
+      name = "float";
+    } else if (prop.indexOf("-") >= 0) {
+      name = prop.toLowerCase();
+    } else {
+      name = prop.replace(/^(webkit|moz|ms|o)(?=[A-Z])/, "-$1")
+        .replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+    }
+    return supportedProperties.has(name) ? name : null;
+  };
+
+  /* Split declarations, such as the style attribute, into [name, value,
+   * important] entries, later ones replacing earlier ones.
+   */
+  const parseDeclarations = (text) => {
+    const parts = [];
+    let buf = "";
+    let depth = 0;
+    let quote = null;
+    for (const ch of String(text)) {
+      if (quote !== null) {
+        if (ch === quote) {
+          quote = null;
+        }
+      } else if (ch === "\"" || ch === "'") {
+        quote = ch;
+      } else if (ch === "(") {
+        depth++;
+      } else if (ch === ")") {
+        depth = Math.max(0, depth - 1);
+      } else if (ch === ";" && depth === 0) {
+        parts.push(buf);
+        buf = "";
+        continue;
+      }
+      buf += ch;
+    }
+    parts.push(buf);
+
+    const entries = [];
+    for (const part of parts) {
+      const colon = part.indexOf(":");
+      if (colon < 0) {
+        continue;
+      }
+      let name = part.slice(0, colon).trim();
+      if (!name.startsWith("--")) {
+        name = name.toLowerCase();
+      }
+      let value = part.slice(colon + 1).trim();
+      let important = false;
+      const m = /!\s*important\s*$/i.exec(value);
+      if (m) {
+        important = true;
+        value = value.slice(0, m.index).trim();
+      }
+      if (name === "" || value === "") {
+        continue;
+      }
+      const at = entries.findIndex(([n]) => n === name);
+      if (at >= 0) {
+        entries.splice(at, 1);
+      }
+      entries.push([name, value, important]);
+    }
+    return entries;
+  };
+
+  const serializeDeclarations = (entries) => entries.map(([name, value, important]) =>
+    name + ": " + value + (important ? " !important" : "") + ";").join(" ");
+
+  /* The owner of each declaration: { element, computed } */
+  const declarationOwners = new WeakMap();
+
+  const ownerOf = (decl) => {
+    const owner = declarationOwners.get(decl);
+    if (owner === undefined) {
+      throw new TypeError("Illegal invocation");
+    }
+    return owner;
+  };
+
+  const inlineEntries = (element) => parseDeclarations(element.getAttribute("style") || "");
+
+  const writeEntries = (element, entries) => {
+    if (entries.length === 0) {
+      element.removeAttribute("style");
+    } else {
+      element.setAttribute("style", serializeDeclarations(entries));
+    }
+  };
+
+  const readOnly = () => domError("NoModificationAllowedError",
+    "computed style declarations are read only");
+
+  defineMethods(CSSStyleDeclaration.prototype, {
+    getPropertyValue(name) {
+      const owner = ownerOf(this);
+      name = String(name);
+      if (!name.startsWith("--")) {
+        name = name.toLowerCase();
+      }
+      if (owner.computed) {
+        const value = native.style(owner.element, name);
+        return value === undefined ? "" : value;
+      }
+      const entry = inlineEntries(owner.element).find(([n]) => n === name);
+      return entry ? entry[1] : "";
+    },
+    getPropertyPriority(name) {
+      const owner = ownerOf(this);
+      if (owner.computed) {
+        return "";
+      }
+      name = String(name).toLowerCase();
+      const entry = inlineEntries(owner.element).find(([n]) => n === name);
+      return entry && entry[2] ? "important" : "";
+    },
+    setProperty(name, value, priority = "") {
+      const owner = ownerOf(this);
+      if (owner.computed) {
+        throw readOnly();
+      }
+      name = String(name);
+      if (!name.startsWith("--")) {
+        name = name.toLowerCase();
+        if (!supportedProperties.has(name)) {
+          return;
+        }
+      }
+      if (value === null || String(value).trim() === "") {
+        this.removeProperty(name);
+        return;
+      }
+      const entries = inlineEntries(owner.element).filter(([n]) => n !== name);
+      entries.push([name, String(value).trim(), String(priority).toLowerCase() === "important"]);
+      writeEntries(owner.element, entries);
+    },
+    removeProperty(name) {
+      const owner = ownerOf(this);
+      if (owner.computed) {
+        throw readOnly();
+      }
+      name = String(name);
+      if (!name.startsWith("--")) {
+        name = name.toLowerCase();
+      }
+      const entries = inlineEntries(owner.element);
+      const entry = entries.find(([n]) => n === name);
+      if (entry === undefined) {
+        return "";
+      }
+      writeEntries(owner.element, entries.filter(([n]) => n !== name));
+      return entry[1];
+    },
+    item(index) {
+      const owner = ownerOf(this);
+      if (owner.computed) {
+        return "";
+      }
+      const entry = inlineEntries(owner.element)[index >>> 0];
+      return entry ? entry[0] : "";
+    }
+  });
+
+  defineAccessors(CSSStyleDeclaration.prototype, {
+    get length() {
+      const owner = ownerOf(this);
+      return owner.computed ? 0 : inlineEntries(owner.element).length;
+    },
+    get cssText() {
+      const owner = ownerOf(this);
+      return owner.computed ? "" : serializeDeclarations(inlineEntries(owner.element));
+    },
+    set cssText(text) {
+      const owner = ownerOf(this);
+      if (owner.computed) {
+        throw readOnly();
+      }
+      writeEntries(owner.element, parseDeclarations(text));
+    },
+    get cssFloat() { return this.getPropertyValue("float"); },
+    set cssFloat(value) { this.setProperty("float", value); },
+    get parentRule() { return null; }
+  });
+
+  /* Supported properties are also accessed by their scripting names */
+  const declarationHandler = {
+    get(target, prop, receiver) {
+      if (typeof prop === "string" && !(prop in target)) {
+        const name = cssName(prop);
+        if (name !== null) {
+          return receiver.getPropertyValue(name);
+        }
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+    set(target, prop, value, receiver) {
+      if (typeof prop === "string" && !(prop in target)) {
+        const name = cssName(prop);
+        if (name !== null) {
+          receiver.setProperty(name, value);
+          return true;
+        }
+      }
+      return Reflect.set(target, prop, value, receiver);
+    },
+    has(target, prop) {
+      return (typeof prop === "string" && cssName(prop) !== null) || prop in target;
+    }
+  };
+
+  const makeDeclaration = (element, computed) => {
+    const decl = new Proxy(Object.create(CSSStyleDeclaration.prototype), declarationHandler);
+    declarationOwners.set(decl, { element, computed });
+    return decl;
+  };
+
+  const inlineStyles = new WeakMap();
+  const styleAccessor = {
+    get style() {
+      let decl = inlineStyles.get(this);
+      if (decl === undefined) {
+        decl = makeDeclaration(this, false);
+        inlineStyles.set(this, decl);
+      }
+      return decl;
+    },
+    set style(text) {
+      this.style.cssText = text;
+    }
+  };
+  defineAccessors(Element.prototype, styleAccessor);
+  defineAccessors(HTMLElement.prototype, styleAccessor);
+
   defineMethods(global, {
     getComputedStyle(element) {
       if (!(element instanceof Element)) {
         throw new TypeError("getComputedStyle: argument is not an Element");
       }
-      return new Proxy({
-        getPropertyValue: () => "",
-        getPropertyPriority: () => "",
-        item: () => "",
-        length: 0,
-        cssText: ""
-      }, {
-        get(target, prop) {
-          return prop in target ? target[prop] : (typeof prop === "string" ? "" : undefined);
-        }
-      });
+      return makeDeclaration(element, true);
     },
 
     matchMedia(query) {

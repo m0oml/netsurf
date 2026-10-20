@@ -46,11 +46,14 @@
 #include "utils/log.h"
 #include "utils/corestrings.h"
 #include "content/content.h"
+#include "netsurf/browser_window.h"
 
 #include "javascript/js.h"
 #include "javascript/content.h"
+#include "html/private.h"
 
 #include "quickjs/binding.h"
+#include "quickjs/private.h"
 #include "quickjs/generics.js.inc"
 #include "quickjs/polyfill.js.inc"
 #include "quickjs/webcompat.js.inc"
@@ -1081,6 +1084,192 @@ qjsky_eval(JSContext *jctx,
 }
 
 
+/**
+ * Get the HTML content of a thread.
+ *
+ * \return The content or NULL if the thread has no Window
+ */
+static html_content *qjsky_html_content(jsthread *thread)
+{
+	window_private_t *window = thread->window_priv;
+
+	return (window == NULL) ? NULL : window->htmlc;
+}
+
+
+/**
+ * Get the DOM node of a javascript Node object.
+ *
+ * \return The node or NULL if obj is not a Node
+ */
+static dom_node *qjsky_node_of(jsthread *thread, JSValueConst obj)
+{
+	void *priv = NULL;
+	int idx;
+
+	idx = qjsky_resolve(thread, obj, &priv);
+	if (!qjsky_class_is_a(idx, QJSKY_PROTO_NODE) || (priv == NULL)) {
+		return NULL;
+	}
+	return ((node_private_t *)priv)->node;
+}
+
+
+/**
+ * Native layout query: the geometry of an element.
+ *
+ * Returns [x, y, width, height, clientWidth, clientHeight, scrollWidth,
+ * scrollHeight] in document coordinates or null if not displayed.
+ */
+static JSValue
+qjsky_native_geometry(JSContext *jctx,
+		      JSValueConst this_val,
+		      int argc,
+		      JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	struct html_layout_geometry g;
+	dom_node *node;
+	JSValue res;
+
+	node = (argc > 0) ? qjsky_node_of(thread, argv[0]) : NULL;
+	if ((htmlc == NULL) || (node == NULL) ||
+	    !html_layout_node_geometry(htmlc, node, &g)) {
+		return JS_NULL;
+	}
+
+	res = JS_NewArray(jctx);
+	JS_SetPropertyUint32(jctx, res, 0, JS_NewInt32(jctx, g.x));
+	JS_SetPropertyUint32(jctx, res, 1, JS_NewInt32(jctx, g.y));
+	JS_SetPropertyUint32(jctx, res, 2, JS_NewInt32(jctx, g.width));
+	JS_SetPropertyUint32(jctx, res, 3, JS_NewInt32(jctx, g.height));
+	JS_SetPropertyUint32(jctx, res, 4, JS_NewInt32(jctx, g.client_width));
+	JS_SetPropertyUint32(jctx, res, 5, JS_NewInt32(jctx, g.client_height));
+	JS_SetPropertyUint32(jctx, res, 6, JS_NewInt32(jctx, g.scroll_width));
+	JS_SetPropertyUint32(jctx, res, 7, JS_NewInt32(jctx, g.scroll_height));
+
+	return res;
+}
+
+
+/**
+ * Native layout query: the viewport.
+ *
+ * Returns [width, height, scrollX, scrollY].
+ */
+static JSValue
+qjsky_native_viewport(JSContext *jctx,
+		      JSValueConst this_val,
+		      int argc,
+		      JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	int width = 0;
+	int height = 0;
+	int scroll_x = 0;
+	int scroll_y = 0;
+	JSValue res;
+
+	if (htmlc != NULL) {
+		html_layout_viewport(htmlc, &width, &height,
+				     &scroll_x, &scroll_y);
+	}
+
+	res = JS_NewArray(jctx);
+	JS_SetPropertyUint32(jctx, res, 0, JS_NewInt32(jctx, width));
+	JS_SetPropertyUint32(jctx, res, 1, JS_NewInt32(jctx, height));
+	JS_SetPropertyUint32(jctx, res, 2, JS_NewInt32(jctx, scroll_x));
+	JS_SetPropertyUint32(jctx, res, 3, JS_NewInt32(jctx, scroll_y));
+
+	return res;
+}
+
+
+/**
+ * Native layout query: a computed style value of an element.
+ *
+ * Returns the value as a string or undefined if it is not known.
+ */
+static JSValue
+qjsky_native_style(JSContext *jctx,
+		   JSValueConst this_val,
+		   int argc,
+		   JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	const char *property;
+	dom_node *node;
+	char *value;
+	JSValue res;
+
+	if ((htmlc == NULL) || (argc < 2)) {
+		return JS_UNDEFINED;
+	}
+	node = qjsky_node_of(thread, argv[0]);
+	if (node == NULL) {
+		return JS_UNDEFINED;
+	}
+
+	property = JS_ToCString(jctx, argv[1]);
+	if (property == NULL) {
+		return JS_EXCEPTION;
+	}
+	value = html_layout_computed_style(htmlc, node, property);
+	JS_FreeCString(jctx, property);
+
+	if (value == NULL) {
+		return JS_UNDEFINED;
+	}
+	res = JS_NewString(jctx, value);
+	free(value);
+
+	return res;
+}
+
+
+/**
+ * Native: scroll the window to a position in the document.
+ */
+static JSValue
+qjsky_native_scroll_to(JSContext *jctx,
+		       JSValueConst this_val,
+		       int argc,
+		       JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	int32_t x = 0;
+	int32_t y = 0;
+
+	if ((htmlc == NULL) || (htmlc->bw == NULL) || (argc < 2)) {
+		return JS_UNDEFINED;
+	}
+	if ((JS_ToInt32(jctx, &x, argv[0]) < 0) ||
+	    (JS_ToInt32(jctx, &y, argv[1]) < 0)) {
+		return JS_EXCEPTION;
+	}
+
+	browser_window_scroll_to(htmlc->bw, max(x, 0), max(y, 0));
+
+	return JS_UNDEFINED;
+}
+
+
+/**
+ * Native functions for webcompat.js, which removes them from the
+ * global object once it has them.
+ */
+static const JSCFunctionListEntry qjsky_native_funcs[] = {
+	JS_CFUNC_DEF("__netsurf_geometry", 1, qjsky_native_geometry),
+	JS_CFUNC_DEF("__netsurf_viewport", 0, qjsky_native_viewport),
+	JS_CFUNC_DEF("__netsurf_style", 2, qjsky_native_style),
+	JS_CFUNC_DEF("__netsurf_scroll_to", 2, qjsky_native_scroll_to),
+};
+
+
 /* exported interface documented in js.h */
 void js_initialise(void)
 {
@@ -1318,6 +1507,8 @@ js_newthread(jsheap *heap, void *win_priv, void *doc_priv, jsthread **thread)
 	}
 
 	/* And the interfaces implemented in javascript */
+	JS_SetPropertyFunctionList(ret->jctx, ret->global, qjsky_native_funcs,
+				   NOF_ELEMENTS(qjsky_native_funcs));
 	res = qjsky_eval(ret->jctx, webcompat_js, webcompat_js_len,
 			 "", "", "webcompat.js");
 	if (JS_IsException(res)) {
