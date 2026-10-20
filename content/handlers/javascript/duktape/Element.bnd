@@ -234,6 +234,62 @@ getter Element::tagName ()
 	return 1;
 %}
 
+getter Element::namespaceURI ()
+%{
+	dom_string *ns = NULL;
+	dom_exception exc;
+
+	exc = dom_node_get_namespace(priv->parent.node, &ns);
+	if (exc != DOM_NO_ERR) return 0;
+
+	if (ns == NULL) {
+		duk_push_null(ctx);
+	} else {
+		duk_push_lstring(ctx, dom_string_data(ns), dom_string_length(ns));
+		dom_string_unref(ns);
+	}
+
+	return 1;
+%}
+
+getter Element::prefix ()
+%{
+	dom_string *pfx = NULL;
+	dom_exception exc;
+
+	exc = dom_node_get_prefix(priv->parent.node, &pfx);
+	if (exc != DOM_NO_ERR) return 0;
+
+	if (pfx == NULL) {
+		duk_push_null(ctx);
+	} else {
+		duk_push_lstring(ctx, dom_string_data(pfx), dom_string_length(pfx));
+		dom_string_unref(pfx);
+	}
+
+	return 1;
+%}
+
+getter Element::localName ()
+%{
+	dom_string *name = NULL;
+	dom_string *lower = NULL;
+	dom_exception exc;
+
+	exc = dom_node_get_local_name(priv->parent.node, &name);
+	if ((exc != DOM_NO_ERR) || (name == NULL)) return 0;
+
+	/* libdom keeps element names in upper case in HTML documents */
+	exc = dom_string_tolower(name, true, &lower);
+	dom_string_unref(name);
+	if (exc != DOM_NO_ERR) return 0;
+
+	duk_push_lstring(ctx, dom_string_data(lower), dom_string_length(lower));
+	dom_string_unref(lower);
+
+	return 1;
+%}
+
 getter Element::id ()
 %{
 	dom_string *idstr = NULL;
