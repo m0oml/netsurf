@@ -194,6 +194,7 @@ html_object_callback(hlcache_handle *object,
 		break;
 
 	case CONTENT_MSG_DONE:
+		o->done = true;
 		c->base.active--;
 		NSLOG(netsurf, INFO, "%d fetches active", c->base.active);
 
@@ -225,6 +226,7 @@ html_object_callback(hlcache_handle *object,
 		hlcache_handle_release(object);
 
 		o->content = NULL;
+		o->done = true;
 
 		c->base.active--;
 		NSLOG(netsurf, INFO, "%d fetches active", c->base.active);
@@ -684,10 +686,11 @@ nserror html_object_close_objects(html_content *html)
 
 
 /* exported interface documented in html/object.h */
-nserror html_object_free_objects(html_content *html)
+nserror
+html_object_free_list(html_content *html, struct content_html_object *list)
 {
-	while (html->object_list != NULL) {
-		struct content_html_object *victim = html->object_list;
+	while (list != NULL) {
+		struct content_html_object *victim = list;
 
 		if (victim->content != NULL) {
 			NSLOG(netsurf, INFO, "object %p", victim->content);
@@ -698,10 +701,27 @@ nserror html_object_free_objects(html_content *html)
 			hlcache_handle_release(victim->content);
 		}
 
-		html->object_list = victim->next;
+		/* an unfinished fetch for a box is counted as active */
+		if (victim->box != NULL && victim->done == false) {
+			html->base.active--;
+		}
+
+		list = victim->next;
 		free(victim);
 	}
 	return NSERROR_OK;
+}
+
+
+/* exported interface documented in html/object.h */
+nserror html_object_free_objects(html_content *html)
+{
+	struct content_html_object *list = html->object_list;
+
+	html->object_list = NULL;
+	html->num_objects = 0;
+
+	return html_object_free_list(html, list);
 }
 
 

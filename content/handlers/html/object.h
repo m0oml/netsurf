@@ -25,6 +25,7 @@
 #define NETSURF_HTML_OBJECT_H
 
 struct html_content;
+struct content_html_object;
 struct browser_window;
 struct box;
 struct nsurl;
@@ -55,6 +56,18 @@ bool html_fetch_object(struct html_content *c, struct nsurl *url, struct box *bo
  * \return NSERROR_OK on success else appropriate error code.
  */
 nserror html_object_free_objects(struct html_content *html);
+
+/**
+ * Release a list of content objects which belonged to a HTML content.
+ *
+ * Unfinished fetches for boxes are removed from the content's count of
+ * active fetches.
+ *
+ * \param html The html content which owned the objects
+ * \param list The objects to release
+ * \return NSERROR_OK on success else appropriate error code.
+ */
+nserror html_object_free_list(struct html_content *html, struct content_html_object *list);
 
 /**
  * close content of content objects associated with a HTML content

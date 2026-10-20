@@ -83,6 +83,19 @@
  */
 nserror dom_to_box(struct dom_node *n, struct html_content *c, box_construct_complete_cb cb, void **box_conversion_context);
 
+/**
+ * Construct a box tree from a dom without yielding.
+ *
+ * Unlike dom_to_box() the conversion is complete, and cb has been
+ * called, when this returns.  The content's box tree context must exist.
+ *
+ * \param n dom node to generate boxes for
+ * \param c content of type CONTENT_HTML that is being processed
+ * \param cb callback to call when the conversion is complete
+ * \return NSERROR_OK on success else error code.
+ */
+nserror dom_to_box_sync(struct dom_node *n, struct html_content *c, box_construct_complete_cb cb);
+
 
 /**
  * aborts any ongoing box construction
