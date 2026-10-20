@@ -26,10 +26,15 @@
  * Implementation of special element handling conversion.
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdbool.h>
 #include <dom/dom.h>
+#include <nsutils/base64.h>
 
+#include "utils/utils.h"
 #include "utils/nsoption.h"
 #include "utils/corestrings.h"
 #include "utils/log.h"
@@ -1857,6 +1862,446 @@ static bool box_textarea(dom_node *n,
 
 
 /* exported interface documented in html/box_special.h */
+/**
+ * Buffer an inline SVG document is written to.
+ */
+struct box_svg_writer {
+	char *buf; /**< the document so far */
+	size_t len; /**< length of the document */
+	size_t alloc; /**< allocated size of buf */
+	bool failed; /**< whether memory ran out */
+	char colour[8]; /**< value for currentColor, as #rrggbb */
+};
+
+
+/**
+ * Add text to an inline SVG document.
+ */
+static void box_svg_write(struct box_svg_writer *w, const char *s, size_t len)
+{
+	if (w->failed) {
+		return;
+	}
+	if (w->len + len + 1 > w->alloc) {
+		size_t alloc = (w->alloc == 0) ? 1024 : w->alloc;
+		char *buf;
+
+		while (w->len + len + 1 > alloc) {
+			alloc *= 2;
+		}
+		buf = realloc(w->buf, alloc);
+		if (buf == NULL) {
+			w->failed = true;
+			return;
+		}
+		w->buf = buf;
+		w->alloc = alloc;
+	}
+	memcpy(w->buf + w->len, s, len);
+	w->len += len;
+	w->buf[w->len] = '\0';
+}
+
+
+/**
+ * Add text to an inline SVG document, escaping markup and replacing
+ * currentColor, which libsvgtiny does not support, by the colour.
+ */
+static void
+box_svg_write_escaped(struct box_svg_writer *w, const char *s, size_t len)
+{
+	static const char current[] = "currentcolor";
+	const size_t current_len = SLEN(current);
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		switch (s[i]) {
+		case '&':
+			box_svg_write(w, "&amp;", 5);
+			break;
+		case '<':
+			box_svg_write(w, "&lt;", 4);
+			break;
+		case '>':
+			box_svg_write(w, "&gt;", 4);
+			break;
+		case '"':
+			box_svg_write(w, "&quot;", 6);
+			break;
+		default:
+			if ((len - i >= current_len) &&
+			    (strncasecmp(s + i, current, current_len) == 0)) {
+				box_svg_write(w, w->colour, strlen(w->colour));
+				i += current_len - 1;
+			} else {
+				box_svg_write(w, s + i, 1);
+			}
+			break;
+		}
+	}
+}
+
+
+/**
+ * Write the name of an SVG element.
+ *
+ * Element names in an HTML document are upper case, so the case of SVG
+ * names is restored.
+ */
+static void box_svg_write_name(struct box_svg_writer *w, dom_string *name)
+{
+	static const char *camel[] = {
+		"altGlyph", "altGlyphDef", "altGlyphItem", "animateColor",
+		"animateMotion", "animateTransform", "clipPath", "feBlend",
+		"feColorMatrix", "feComponentTransfer", "feComposite",
+		"feConvolveMatrix", "feDiffuseLighting", "feDisplacementMap",
+		"feDistantLight", "feDropShadow", "feFlood", "feFuncA",
+		"feFuncB", "feFuncG", "feFuncR", "feGaussianBlur", "feImage",
+		"feMerge", "feMergeNode", "feMorphology", "feOffset",
+		"fePointLight", "feSpecularLighting", "feSpotLight", "feTile",
+		"feTurbulence", "foreignObject", "glyphRef", "linearGradient",
+		"radialGradient", "textPath"
+	};
+	const char *s = dom_string_data(name);
+	size_t len = dom_string_byte_length(name);
+	size_t i;
+
+	for (i = 0; i < NOF_ELEMENTS(camel); i++) {
+		if ((strlen(camel[i]) == len) &&
+		    (strncasecmp(camel[i], s, len) == 0)) {
+			box_svg_write(w, camel[i], len);
+			return;
+		}
+	}
+
+	for (i = 0; i < len; i++) {
+		char c = ascii_to_lower(s[i]);
+		box_svg_write(w, &c, 1);
+	}
+}
+
+
+/**
+ * Write the name of an attribute of an SVG element.
+ *
+ * Attribute names in an HTML document are lower case, so the case of
+ * SVG attribute names is restored.
+ */
+static void
+box_svg_write_attr_name(struct box_svg_writer *w, const char *s, size_t len)
+{
+	static const char *camel[] = {
+		"attributeName", "attributeType", "baseFrequency",
+		"baseProfile", "calcMode", "clipPathUnits", "diffuseConstant",
+		"edgeMode", "filterUnits", "glyphRef", "gradientTransform",
+		"gradientUnits", "kernelMatrix", "kernelUnitLength",
+		"keyPoints", "keySplines", "keyTimes", "lengthAdjust",
+		"limitingConeAngle", "markerHeight", "markerUnits",
+		"markerWidth", "maskContentUnits", "maskUnits", "numOctaves",
+		"pathLength", "patternContentUnits", "patternTransform",
+		"patternUnits", "pointsAtX", "pointsAtY", "pointsAtZ",
+		"preserveAlpha", "preserveAspectRatio", "primitiveUnits",
+		"refX", "refY", "repeatCount", "repeatDur",
+		"requiredExtensions", "requiredFeatures", "specularConstant",
+		"specularExponent", "spreadMethod", "startOffset",
+		"stdDeviation", "stitchTiles", "surfaceScale",
+		"systemLanguage", "tableValues", "targetX", "targetY",
+		"textLength", "viewBox", "viewTarget", "xChannelSelector",
+		"yChannelSelector", "zoomAndPan"
+	};
+	size_t i;
+
+	for (i = 0; i < NOF_ELEMENTS(camel); i++) {
+		if ((strlen(camel[i]) == len) &&
+		    (strncasecmp(camel[i], s, len) == 0)) {
+			box_svg_write(w, camel[i], len);
+			return;
+		}
+	}
+
+	box_svg_write(w, s, len);
+}
+
+
+/**
+ * Write an SVG element, its attributes and its contents.
+ *
+ * \param w The document being written
+ * \param n The node to write
+ * \param root Whether the node is the svg element itself
+ */
+static void
+box_svg_write_node(struct box_svg_writer *w, dom_node *n, bool root)
+{
+	dom_node_type type;
+	dom_exception exc;
+
+	exc = dom_node_get_node_type(n, &type);
+	if (exc != DOM_NO_ERR) {
+		return;
+	}
+
+	if ((type == DOM_TEXT_NODE) || (type == DOM_CDATA_SECTION_NODE)) {
+		dom_string *text = NULL;
+
+		exc = dom_characterdata_get_data(n, &text);
+		if ((exc == DOM_NO_ERR) && (text != NULL)) {
+			box_svg_write_escaped(w, dom_string_data(text),
+					      dom_string_byte_length(text));
+			dom_string_unref(text);
+		}
+		return;
+	}
+
+	if (type == DOM_ELEMENT_NODE) {
+		dom_string *name = NULL;
+		dom_namednodemap *attrs = NULL;
+		dom_node *child = NULL;
+		bool has_xmlns = false;
+		bool has_xlink = false;
+		bool has_width = false;
+		bool has_height = false;
+		float vb_width = 0;
+		float vb_height = 0;
+		uint32_t count = 0;
+		uint32_t i;
+
+		exc = dom_node_get_local_name(n, &name);
+		if ((exc != DOM_NO_ERR) || (name == NULL)) {
+			return;
+		}
+
+		box_svg_write(w, "<", 1);
+		box_svg_write_name(w, name);
+
+		exc = dom_node_get_attributes(n, &attrs);
+		if ((exc == DOM_NO_ERR) && (attrs != NULL)) {
+			if (dom_namednodemap_get_length(attrs, &count) !=
+			    DOM_NO_ERR) {
+				count = 0;
+			}
+		}
+		for (i = 0; i < count; i++) {
+			dom_node *attr = NULL;
+			dom_string *aname = NULL;
+			dom_string *avalue = NULL;
+
+			exc = dom_namednodemap_item(attrs, i, &attr);
+			if ((exc != DOM_NO_ERR) || (attr == NULL)) {
+				continue;
+			}
+			if ((dom_attr_get_name(attr, &aname) == DOM_NO_ERR) &&
+			    (aname != NULL) &&
+			    (dom_attr_get_value(attr, &avalue) == DOM_NO_ERR) &&
+			    (avalue != NULL)) {
+				const char *an = dom_string_data(aname);
+
+				if (strcmp(an, "xmlns") == 0) {
+					has_xmlns = true;
+				} else if (strcmp(an, "xmlns:xlink") == 0) {
+					has_xlink = true;
+				} else if (strcasecmp(an, "width") == 0) {
+					has_width = true;
+				} else if (strcasecmp(an, "height") == 0) {
+					has_height = true;
+				} else if (strcasecmp(an, "viewbox") == 0) {
+					float x, y;
+					if (sscanf(dom_string_data(avalue),
+						   "%f%*[ ,]%f%*[ ,]%f%*[ ,]%f",
+						   &x, &y, &vb_width,
+						   &vb_height) != 4) {
+						vb_width = 0;
+						vb_height = 0;
+					}
+				}
+				box_svg_write(w, " ", 1);
+				box_svg_write_attr_name(w, an,
+					dom_string_byte_length(aname));
+				box_svg_write(w, "=\"", 2);
+				box_svg_write_escaped(w,
+					dom_string_data(avalue),
+					dom_string_byte_length(avalue));
+				box_svg_write(w, "\"", 1);
+			}
+			if (aname != NULL) {
+				dom_string_unref(aname);
+			}
+			if (avalue != NULL) {
+				dom_string_unref(avalue);
+			}
+			dom_node_unref(attr);
+		}
+		if (attrs != NULL) {
+			dom_namednodemap_unref(attrs);
+		}
+
+		if (root && !has_xmlns) {
+			box_svg_write(w, " xmlns=\"http://www.w3.org/2000/svg\"",
+				      SLEN(" xmlns=\"http://www.w3.org/2000/svg\""));
+		}
+		if (root && (vb_width > 0) && (vb_height > 0)) {
+			/* without a size the SVG has none of its own, so
+			 * take the size of the view box, which CSS scales
+			 */
+			char size[64];
+
+			if (!has_width) {
+				int len = snprintf(size, sizeof(size),
+						   " width=\"%g\"", vb_width);
+				box_svg_write(w, size, len);
+			}
+			if (!has_height) {
+				int len = snprintf(size, sizeof(size),
+						   " height=\"%g\"", vb_height);
+				box_svg_write(w, size, len);
+			}
+		}
+		if (root && !has_xlink) {
+			box_svg_write(w,
+				" xmlns:xlink=\"http://www.w3.org/1999/xlink\"",
+				SLEN(" xmlns:xlink=\"http://www.w3.org/1999/xlink\""));
+		}
+		box_svg_write(w, ">", 1);
+
+		exc = dom_node_get_first_child(n, &child);
+		while ((exc == DOM_NO_ERR) && (child != NULL)) {
+			dom_node *next = NULL;
+
+			box_svg_write_node(w, child, false);
+			exc = dom_node_get_next_sibling(child, &next);
+			dom_node_unref(child);
+			child = next;
+		}
+
+		box_svg_write(w, "</", 2);
+		box_svg_write_name(w, name);
+		box_svg_write(w, ">", 1);
+		dom_string_unref(name);
+	}
+}
+
+
+/**
+ * Check if an element is an svg element in the SVG namespace.
+ */
+static bool box_is_svg(dom_node *n)
+{
+	dom_string *name = NULL;
+	dom_string *ns = NULL;
+	bool svg = false;
+
+	if ((dom_node_get_namespace(n, &ns) != DOM_NO_ERR) || (ns == NULL)) {
+		return false;
+	}
+	if (dom_string_isequal(ns, dom_namespaces[DOM_NAMESPACE_SVG]) &&
+	    (dom_node_get_local_name(n, &name) == DOM_NO_ERR) &&
+	    (name != NULL)) {
+		svg = (strcasecmp(dom_string_data(name), "svg") == 0);
+	}
+	if (name != NULL) {
+		dom_string_unref(name);
+	}
+	dom_string_unref(ns);
+
+	return svg;
+}
+
+
+/**
+ * Inline SVG.
+ *
+ * The svg element and its contents are written out as an SVG document,
+ * which is shown as an object fetched from a data: URL, as for an img.
+ */
+static bool
+box_svg(dom_node *n,
+	html_content *content,
+	struct box *box,
+	bool *convert_children)
+{
+	struct box_svg_writer w;
+	uint8_t *encoded = NULL;
+	size_t encoded_len = 0;
+	css_color colour = 0;
+	char *data_url;
+	nsurl *url;
+	enum css_width_e wtype;
+	enum css_height_e htype;
+	css_fixed value = 0;
+	css_unit wunit = CSS_UNIT_PX;
+	css_unit hunit = CSS_UNIT_PX;
+	nserror err;
+	bool ok;
+
+	/* the contents are SVG, not HTML */
+	*convert_children = false;
+
+	if (box->style == NULL ||
+	    ns_computed_display(box->style, box_is_root(n)) ==
+			CSS_DISPLAY_NONE) {
+		return true;
+	}
+
+	if (nsoption_bool(foreground_images) == false) {
+		return true;
+	}
+
+	memset(&w, 0, sizeof(w));
+	css_computed_color(box->style, &colour);
+	snprintf(w.colour, sizeof(w.colour), "#%06x",
+		 (unsigned int)(colour & 0xffffff));
+
+	box_svg_write_node(&w, n, true);
+	if (w.failed || (w.buf == NULL)) {
+		free(w.buf);
+		return false;
+	}
+
+	if (nsu_base64_encode_alloc((const uint8_t *)w.buf, w.len,
+				    &encoded, &encoded_len) != NSUERROR_OK) {
+		free(w.buf);
+		return false;
+	}
+	free(w.buf);
+
+	data_url = malloc(SLEN("data:image/svg+xml;base64,") +
+			  encoded_len + 1);
+	if (data_url == NULL) {
+		free(encoded);
+		return false;
+	}
+	memcpy(data_url, "data:image/svg+xml;base64,",
+	       SLEN("data:image/svg+xml;base64,"));
+	memcpy(data_url + SLEN("data:image/svg+xml;base64,"), encoded,
+	       encoded_len);
+	data_url[SLEN("data:image/svg+xml;base64,") + encoded_len] = '\0';
+	free(encoded);
+
+	err = nsurl_create(data_url, &url);
+	free(data_url);
+	if (err != NSERROR_OK) {
+		return false;
+	}
+
+	box->flags |= IS_REPLACED;
+	ok = html_fetch_object(content, url, box, image_types, false);
+	nsurl_unref(url);
+
+	wtype = css_computed_width(box->style, &value, &wunit);
+	htype = css_computed_height(box->style, &value, &hunit);
+
+	if (wtype == CSS_WIDTH_SET &&
+	    wunit != CSS_UNIT_PCT &&
+	    htype == CSS_HEIGHT_SET &&
+	    hunit != CSS_UNIT_PCT) {
+		/* the size the image is shown at is known */
+		box->flags |= REPLACE_DIM;
+	}
+
+	return ok;
+}
+
+
 bool
 convert_special_elements(dom_node *node,
 			 html_content *content,
@@ -1866,6 +2311,11 @@ convert_special_elements(dom_node *node,
 	dom_exception exc;
 	dom_html_element_type tag_type;
 	bool res;
+
+	/* SVG elements are not HTML elements, which have a tag type */
+	if (box_is_svg(node)) {
+		return box_svg(node, content, box, convert_children);
+	}
 
 	exc = dom_html_element_get_tag_type(node, &tag_type);
 	if (exc != DOM_NO_ERR) {
