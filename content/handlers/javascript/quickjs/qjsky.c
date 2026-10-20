@@ -83,6 +83,19 @@ struct jsheap {
 	uint64_t exec_start_time; /**< when the current execution began */
 	unsigned int depth; /**< nesting of calls into javascript */
 	JSClassID class_id[QJSKY_PROTO__COUNT]; /**< binding class ids */
+	struct qjsky_rejection *rejections; /**< unhandled promise rejections */
+	unsigned int rejection_count; /**< number of unhandled rejections */
+	unsigned int rejection_alloc; /**< allocated size of rejections */
+};
+
+/**
+ * A promise rejection with no handler, reported at the microtask
+ * checkpoint unless one is added.
+ */
+struct qjsky_rejection {
+	JSContext *jctx; /**< context of the promise */
+	JSValue promise; /**< the rejected promise */
+	JSValue reason; /**< the rejection reason */
 };
 
 /**
@@ -894,11 +907,11 @@ static void qjsky_dump_exception(JSContext *jctx)
 
 
 /**
- * Promise rejection tracker which logs unhandled rejections.
+ * Promise rejection tracker.
  *
- * \todo Browsers only report a rejection which is still unhandled at
- *       the end of the microtask checkpoint; this logs immediately so
- *       a handler attached later still produces a log entry.
+ * Rejections without a handler are noted, and forgotten if a handler
+ * is added, so those still unhandled at the end of the microtask
+ * checkpoint can be reported as browsers do.
  */
 static void
 qjsky_promise_rejection(JSContext *jctx,
@@ -907,8 +920,70 @@ qjsky_promise_rejection(JSContext *jctx,
 			bool is_handled,
 			void *opaque)
 {
-	if (!is_handled) {
-		qjsky_log_error(jctx, "Uncaught (in promise)", reason);
+	jsheap *heap = opaque;
+	unsigned int i;
+
+	if (is_handled) {
+		for (i = 0; i < heap->rejection_count; i++) {
+			if (JS_IsStrictEqual(jctx, heap->rejections[i].promise,
+					     promise)) {
+				JS_FreeValueRT(heap->rt, heap->rejections[i].promise);
+				JS_FreeValueRT(heap->rt, heap->rejections[i].reason);
+				heap->rejections[i] =
+					heap->rejections[--heap->rejection_count];
+				break;
+			}
+		}
+		return;
+	}
+
+	if (heap->rejection_count == heap->rejection_alloc) {
+		unsigned int alloc = heap->rejection_alloc == 0 ?
+			8 : heap->rejection_alloc * 2;
+		struct qjsky_rejection *r;
+
+		r = realloc(heap->rejections, alloc * sizeof *r);
+		if (r == NULL) {
+			/* report it now rather than not at all */
+			qjsky_log_error(jctx, "Uncaught (in promise)", reason);
+			return;
+		}
+		heap->rejections = r;
+		heap->rejection_alloc = alloc;
+	}
+	heap->rejections[heap->rejection_count].jctx = jctx;
+	heap->rejections[heap->rejection_count].promise =
+		JS_DupValueRT(heap->rt, promise);
+	heap->rejections[heap->rejection_count].reason =
+		JS_DupValueRT(heap->rt, reason);
+	heap->rejection_count++;
+}
+
+
+/**
+ * Report and forget the unhandled promise rejections of a heap.
+ *
+ * \param heap The heap
+ * \param jctx Only forget, without reporting, rejections of this
+ *             context, or NULL to report all
+ */
+static void qjsky_flush_rejections(jsheap *heap, JSContext *jctx)
+{
+	unsigned int i = 0;
+
+	while (i < heap->rejection_count) {
+		struct qjsky_rejection r = heap->rejections[i];
+
+		if (jctx != NULL && r.jctx != jctx) {
+			i++;
+			continue;
+		}
+		heap->rejections[i] = heap->rejections[--heap->rejection_count];
+		if (jctx == NULL) {
+			qjsky_log_error(r.jctx, "Uncaught (in promise)", r.reason);
+		}
+		JS_FreeValueRT(heap->rt, r.promise);
+		JS_FreeValueRT(heap->rt, r.reason);
 	}
 }
 
@@ -931,6 +1006,8 @@ static void qjsky_run_jobs(jsheap *heap)
 		}
 	}
 	heap->depth--;
+
+	qjsky_flush_rejections(heap, NULL);
 }
 
 
@@ -1344,6 +1421,8 @@ static void qjsky_destroyheap(jsheap *heap)
 
 	NSLOG(qjsky, DEBUG, "Destroying QuickJS javascript heap");
 
+	assert(heap->rejection_count == 0);
+	free(heap->rejections);
 	JS_FreeRuntime(heap->rt);
 	free(heap);
 }
@@ -1578,6 +1657,7 @@ static void qjsky_destroythread(jsthread *thread)
 	}
 
 	qjsduk_destroy(thread->ctx);
+	qjsky_flush_rejections(heap, thread->jctx);
 	JS_FreeValue(thread->jctx, thread->global);
 	JS_FreeContext(thread->jctx);
 	free(thread);
