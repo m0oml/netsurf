@@ -33,10 +33,18 @@
     /* computed value of a css property of an element, or undefined */
     style: global.__netsurf_style,
     /* scroll the window to a document position */
-    scrollTo: global.__netsurf_scroll_to
+    scrollTo: global.__netsurf_scroll_to,
+    /* start a network request, returning its id; see qjsky.c */
+    fetch: global.__netsurf_fetch,
+    /* abort a network request by id */
+    fetchAbort: global.__netsurf_fetch_abort,
+    /* decode an ArrayBuffer in a character set */
+    decode: global.__netsurf_decode
   };
   for (const name of ["__netsurf_geometry", "__netsurf_viewport",
-                      "__netsurf_style", "__netsurf_scroll_to"]) {
+                      "__netsurf_style", "__netsurf_scroll_to",
+                      "__netsurf_fetch", "__netsurf_fetch_abort",
+                      "__netsurf_decode"]) {
     delete global[name];
   }
 
@@ -2784,4 +2792,1507 @@
 
   defineGlobal("URL", URL);
   defineGlobal("URLSearchParams", URLSearchParams);
+
+  /* Element names */
+
+  /* libdom keeps element names in upper case, losing the case of SVG
+   * names, so restore those the HTML parser would give
+   */
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const HTML_NS = "http://www.w3.org/1999/xhtml";
+  const svgNames = new Map([
+    "altGlyph", "altGlyphDef", "altGlyphItem", "animateColor", "animateMotion",
+    "animateTransform", "clipPath", "feBlend", "feColorMatrix",
+    "feComponentTransfer", "feComposite", "feConvolveMatrix",
+    "feDiffuseLighting", "feDisplacementMap", "feDistantLight", "feDropShadow",
+    "feFlood", "feFuncA", "feFuncB", "feFuncG", "feFuncR", "feGaussianBlur",
+    "feImage", "feMerge", "feMergeNode", "feMorphology", "feOffset",
+    "fePointLight", "feSpecularLighting", "feSpotLight", "feTile",
+    "feTurbulence", "foreignObject", "glyphRef", "linearGradient",
+    "radialGradient", "textPath"
+  ].map((name) => [name.toLowerCase(), name]));
+  {
+    const elementProto = global.Element.prototype;
+    const nativeLocalName = Object.getOwnPropertyDescriptor(elementProto, "localName").get;
+    const nativeTagName = Object.getOwnPropertyDescriptor(elementProto, "tagName").get;
+    defineAccessors(elementProto, {
+      get localName() {
+        const name = nativeLocalName.call(this);
+        if (this.namespaceURI === SVG_NS) {
+          return svgNames.get(name) || name;
+        }
+        return name;
+      },
+      get tagName() {
+        const ns = this.namespaceURI;
+        if (ns === HTML_NS || ns === null) {
+          return nativeTagName.call(this);
+        }
+        const prefix = this.prefix;
+        return (prefix ? prefix + ":" : "") + this.localName;
+      }
+    });
+  }
+
+  /* Document base URL */
+
+  /* libdom has no notion of the document URL so find the base here */
+  const documentBase = (doc) => {
+    const url = doc.URL;
+    const base = doc.querySelector ? doc.querySelector("base[href]") : null;
+    if (base) {
+      try {
+        return new URL(base.getAttribute("href"), url).href;
+      } catch (e) {
+        /* fall back to the document URL */
+      }
+    }
+    return url;
+  };
+  defineAccessors(global.Node.prototype, {
+    get baseURI() {
+      const doc = this.nodeType === DOCUMENT_NODE ? this : this.ownerDocument;
+      return doc ? documentBase(doc) : "about:blank";
+    }
+  });
+
+  /* EventTarget */
+
+  /* Objects made by scripts, rather than nodes, keep their listeners
+   * here.  The EventTarget methods use these for such objects and the
+   * binding for nodes and the window.
+   */
+  const scriptTargets = new WeakMap();
+  const nativeTarget = {
+    ctor: global.EventTarget,
+    add: global.EventTarget.prototype.addEventListener,
+    remove: global.EventTarget.prototype.removeEventListener,
+    dispatch: global.EventTarget.prototype.dispatchEvent
+  };
+
+  const listenerOptions = (options) => {
+    if (typeof options === "boolean") {
+      return { capture: options, once: false, signal: null };
+    }
+    options = options || {};
+    return { capture: !!options.capture, once: !!options.once, signal: options.signal || null };
+  };
+
+  const EventTarget = function EventTarget() {
+    if (new.target === undefined) {
+      throw new TypeError("Constructor EventTarget requires 'new'");
+    }
+    const target = Object.create(new.target.prototype);
+    scriptTargets.set(target, new Map());
+    return target;
+  };
+  EventTarget.prototype = nativeTarget.ctor.prototype;
+  Object.defineProperty(EventTarget.prototype, "constructor", {
+    value: EventTarget, writable: true, configurable: true
+  });
+  defineGlobal("EventTarget", EventTarget);
+
+  /* Set a read only member of an event, which the binding would set
+   * during a real dispatch
+   */
+  const setEventMember = (event, name, value) => {
+    Object.defineProperty(event, name, { value, configurable: true });
+  };
+
+  defineMethods(EventTarget.prototype, {
+    addEventListener(type, callback, options) {
+      const map = scriptTargets.get(this);
+      if (map === undefined) {
+        return nativeTarget.add.apply(this, arguments);
+      }
+      if (callback === null || callback === undefined) {
+        return undefined;
+      }
+      const opts = listenerOptions(options);
+      if (opts.signal && opts.signal.aborted) {
+        return undefined;
+      }
+      type = String(type);
+      let list = map.get(type);
+      if (list === undefined) {
+        list = [];
+        map.set(type, list);
+      }
+      if (list.some((l) => l.callback === callback && l.capture === opts.capture)) {
+        return undefined;
+      }
+      const listener = { callback, capture: opts.capture, once: opts.once, removed: false };
+      list.push(listener);
+      if (opts.signal) {
+        opts.signal.addEventListener("abort", () => {
+          this.removeEventListener(type, callback, { capture: opts.capture });
+        });
+      }
+      return undefined;
+    },
+
+    removeEventListener(type, callback, options) {
+      const map = scriptTargets.get(this);
+      if (map === undefined) {
+        return nativeTarget.remove.apply(this, arguments);
+      }
+      const capture = listenerOptions(options).capture;
+      const list = map.get(String(type));
+      if (list !== undefined) {
+        const i = list.findIndex((l) => l.callback === callback && l.capture === capture);
+        if (i >= 0) {
+          list[i].removed = true;
+          list.splice(i, 1);
+        }
+      }
+      return undefined;
+    },
+
+    dispatchEvent(event) {
+      const map = scriptTargets.get(this);
+      if (map === undefined) {
+        return nativeTarget.dispatch.apply(this, arguments);
+      }
+      if (!(event instanceof global.Event)) {
+        throw new TypeError("dispatchEvent: argument is not an Event");
+      }
+      setEventMember(event, "target", this);
+      setEventMember(event, "currentTarget", this);
+      setEventMember(event, "eventPhase", 2);
+      setEventMember(event, "isTrusted", false);
+      let stopped = false;
+      const stop = event.stopImmediatePropagation;
+      setEventMember(event, "stopImmediatePropagation", function () {
+        stopped = true;
+        return stop.call(this);
+      });
+      for (const listener of (map.get(event.type) || []).slice()) {
+        if (listener.removed) {
+          continue;
+        }
+        if (listener.once) {
+          this.removeEventListener(event.type, listener.callback, { capture: listener.capture });
+        }
+        try {
+          if (typeof listener.callback === "function") {
+            listener.callback.call(this, event);
+          } else if (typeof listener.callback.handleEvent === "function") {
+            listener.callback.handleEvent(event);
+          }
+        } catch (e) {
+          reportError(e);
+        }
+        if (stopped) {
+          break;
+        }
+      }
+      setEventMember(event, "currentTarget", null);
+      setEventMember(event, "eventPhase", 0);
+      return !event.defaultPrevented;
+    }
+  });
+
+  /* Report an exception from a callback without stopping the caller */
+  const reportError = (e) => {
+    console.error(e instanceof Error ? `${e.name}: ${e.message}\n${e.stack || ""}` : String(e));
+  };
+  if (typeof global.reportError !== "function") {
+    defineMethods(global, { reportError });
+  }
+
+  /* Define onevent handler attributes, which are listeners added the
+   * first time they are set
+   */
+  const defineEventHandlers = (proto, types) => {
+    const handlers = new WeakMap();
+    for (const type of types) {
+      Object.defineProperty(proto, "on" + type, {
+        get() {
+          const h = handlers.get(this);
+          return h && h[type] ? h[type].value : null;
+        },
+        set(value) {
+          let h = handlers.get(this);
+          if (h === undefined) {
+            h = {};
+            handlers.set(this, h);
+          }
+          if (h[type] === undefined) {
+            h[type] = { value: null };
+            const slot = h[type];
+            this.addEventListener(type, function (event) {
+              if (typeof slot.value === "function") {
+                const ret = slot.value.call(this, event);
+                if (ret === false) {
+                  event.preventDefault();
+                }
+              }
+            });
+          }
+          h[type].value = typeof value === "function" ? value : null;
+        },
+        enumerable: true,
+        configurable: true
+      });
+    }
+  };
+
+  /* Make an event to dispatch from a script target */
+  const makeEvent = (type, init) => new global.Event(type, init);
+  const makeProgressEvent = (type, loaded, total) =>
+    new global.ProgressEvent(type, { lengthComputable: total > 0, loaded, total });
+
+  /* AbortController and AbortSignal */
+
+  const abortState = new WeakMap();
+
+  class AbortSignal extends EventTarget {
+    constructor() {
+      if (arguments[0] !== abortState) {
+        throw new TypeError("Illegal constructor");
+      }
+      super();
+      abortState.set(this, { aborted: false, reason: undefined });
+    }
+
+    static abort(reason) {
+      const signal = new AbortSignal(abortState);
+      signalAbort(signal, reason);
+      return signal;
+    }
+
+    static timeout(ms) {
+      const signal = new AbortSignal(abortState);
+      setTimeout(() => signalAbort(signal, domError("TimeoutError", "signal timed out")), Number(ms));
+      return signal;
+    }
+
+    static any(signals) {
+      const signal = new AbortSignal(abortState);
+      for (const s of signals) {
+        if (s.aborted) {
+          signalAbort(signal, s.reason);
+          return signal;
+        }
+      }
+      for (const s of signals) {
+        s.addEventListener("abort", () => signalAbort(signal, s.reason));
+      }
+      return signal;
+    }
+
+    get aborted() { return abortState.get(this).aborted; }
+    get reason() { return abortState.get(this).reason; }
+
+    throwIfAborted() {
+      if (this.aborted) {
+        throw this.reason;
+      }
+    }
+
+    get [Symbol.toStringTag]() { return "AbortSignal"; }
+  }
+  defineEventHandlers(AbortSignal.prototype, ["abort"]);
+
+  const signalAbort = (signal, reason) => {
+    const state = abortState.get(signal);
+    if (state.aborted) {
+      return;
+    }
+    state.aborted = true;
+    state.reason = reason === undefined ? domError("AbortError", "signal is aborted without reason") : reason;
+    signal.dispatchEvent(makeEvent("abort"));
+  };
+
+  class AbortController {
+    #signal = new AbortSignal(abortState);
+    get signal() { return this.#signal; }
+    abort(reason) { signalAbort(this.#signal, reason); }
+    get [Symbol.toStringTag]() { return "AbortController"; }
+  }
+
+  defineGlobal("AbortSignal", AbortSignal);
+  defineGlobal("AbortController", AbortController);
+
+  /* Bytes and text */
+
+  const textEncoder = new TextEncoder();
+  const encodeUTF8 = (s) => textEncoder.encode(s);
+  const decodeText = (bytes, charset) => {
+    const buffer = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ?
+      bytes.buffer : bytes.slice().buffer;
+    return native.decode(buffer, charset);
+  };
+
+  /* Bytes of an ArrayBuffer or view */
+  const bufferBytes = (value) => {
+    if (value instanceof ArrayBuffer) {
+      return new Uint8Array(value.slice(0));
+    }
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+    }
+    return null;
+  };
+
+  /* The charset parameter of a MIME type */
+  const mimeCharset = (type) => {
+    const m = /;\s*charset\s*=\s*"?([^";\s]+)/i.exec(type || "");
+    return m ? m[1] : "utf-8";
+  };
+
+  /* The essence of a MIME type, without parameters */
+  const mimeEssence = (type) => String(type || "").split(";")[0].trim().toLowerCase();
+
+  /* Blob and File */
+
+  const blobBytes = new WeakMap();
+
+  class Blob {
+    #type;
+    constructor(parts = [], options = {}) {
+      const chunks = [];
+      for (const part of parts) {
+        if (part instanceof Blob) {
+          chunks.push(blobBytes.get(part));
+        } else if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) {
+          chunks.push(bufferBytes(part));
+        } else {
+          chunks.push(encodeUTF8(String(part)));
+        }
+      }
+      let length = 0;
+      for (const c of chunks) {
+        length += c.length;
+      }
+      const bytes = new Uint8Array(length);
+      let at = 0;
+      for (const c of chunks) {
+        bytes.set(c, at);
+        at += c.length;
+      }
+      blobBytes.set(this, bytes);
+      const type = options.type === undefined ? "" : String(options.type);
+      this.#type = /^[\x20-\x7e]*$/.test(type) ? type.toLowerCase() : "";
+    }
+    get size() { return blobBytes.get(this).length; }
+    get type() { return this.#type; }
+    slice(start = 0, end = this.size, type = "") {
+      const blob = new Blob([], { type });
+      blobBytes.set(blob, blobBytes.get(this).slice(start, end));
+      return blob;
+    }
+    arrayBuffer() { return Promise.resolve(blobBytes.get(this).slice().buffer); }
+    bytes() { return Promise.resolve(blobBytes.get(this).slice()); }
+    text() { return Promise.resolve(decodeText(blobBytes.get(this), "utf-8")); }
+    get [Symbol.toStringTag]() { return "Blob"; }
+  }
+
+  class File extends Blob {
+    #name;
+    #lastModified;
+    constructor(parts, name, options = {}) {
+      super(parts, options);
+      this.#name = String(name);
+      this.#lastModified = options.lastModified === undefined ? Date.now() : Number(options.lastModified);
+    }
+    get name() { return this.#name; }
+    get lastModified() { return this.#lastModified; }
+    get [Symbol.toStringTag]() { return "File"; }
+  }
+
+  defineGlobal("Blob", Blob);
+  defineGlobal("File", File);
+
+  /* FormData */
+
+  class FormData {
+    #entries = [];
+
+    constructor(form, submitter) {
+      if (form === undefined) {
+        return;
+      }
+      if (!(form instanceof global.HTMLFormElement)) {
+        throw new TypeError("FormData: argument is not a form");
+      }
+      for (const el of form.querySelectorAll("input, select, textarea, button")) {
+        const name = el.getAttribute("name");
+        if (!name || el.disabled || el.closest("fieldset[disabled]")) {
+          continue;
+        }
+        const tag = el.localName;
+        const type = (el.getAttribute("type") || "").toLowerCase();
+        if (tag === "button" || (tag === "input" && ["submit", "button", "reset", "image"].includes(type))) {
+          if (el === submitter) {
+            this.append(name, el.value);
+          }
+          continue;
+        }
+        if (tag === "input" && (type === "checkbox" || type === "radio")) {
+          if (el.checked) {
+            this.append(name, el.hasAttribute("value") ? el.value : "on");
+          }
+        } else if (tag === "input" && type === "file") {
+          /* file inputs are not readable by scripts */
+          this.append(name, new File([], "", { type: "application/octet-stream" }));
+        } else if (tag === "select") {
+          for (const option of el.querySelectorAll("option")) {
+            if (option.selected && !option.disabled) {
+              this.append(name, option.value);
+            }
+          }
+        } else {
+          this.append(name, el.value);
+        }
+      }
+    }
+
+    #entry(name, value, filename) {
+      name = String(name);
+      if (value instanceof Blob) {
+        if (!(value instanceof File) || filename !== undefined) {
+          value = new File([value], filename === undefined ? "blob" : filename, { type: value.type });
+        }
+      } else {
+        value = String(value);
+      }
+      return [name, value];
+    }
+
+    append(name, value, filename) { this.#entries.push(this.#entry(name, value, filename)); }
+    delete(name) { name = String(name); this.#entries = this.#entries.filter((e) => e[0] !== name); }
+    get(name) { name = String(name); const e = this.#entries.find((x) => x[0] === name); return e ? e[1] : null; }
+    getAll(name) { name = String(name); return this.#entries.filter((e) => e[0] === name).map((e) => e[1]); }
+    has(name) { name = String(name); return this.#entries.some((e) => e[0] === name); }
+    set(name, value, filename) {
+      const entry = this.#entry(name, value, filename);
+      const i = this.#entries.findIndex((e) => e[0] === entry[0]);
+      if (i < 0) {
+        this.#entries.push(entry);
+      } else {
+        this.#entries[i] = entry;
+        this.#entries = this.#entries.filter((e, j) => j <= i || e[0] !== entry[0]);
+      }
+    }
+    forEach(callback, thisArg) {
+      for (const [name, value] of this.#entries.slice()) {
+        callback.call(thisArg, value, name, this);
+      }
+    }
+    *entries() { yield* this.#entries.map((e) => [e[0], e[1]]); }
+    *keys() { for (const e of this.#entries) { yield e[0]; } }
+    *values() { for (const e of this.#entries) { yield e[1]; } }
+    [Symbol.iterator]() { return this.entries(); }
+    get [Symbol.toStringTag]() { return "FormData"; }
+  }
+  defineGlobal("FormData", FormData);
+
+  /* Encode form data as multipart/form-data */
+  const encodeMultipart = (formData) => {
+    const boundary = "----NetSurfFormBoundary" +
+      Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+    const escape = (s) => s.replace(/\r\n?|\n/g, "\r\n").replace(/"/g, "%22").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    const parts = [];
+    for (const [name, value] of formData) {
+      let head = `--${boundary}\r\nContent-Disposition: form-data; name="${escape(name)}"`;
+      if (value instanceof File) {
+        head += `; filename="${escape(value.name)}"\r\nContent-Type: ${value.type || "application/octet-stream"}\r\n\r\n`;
+        parts.push(head, value, "\r\n");
+      } else {
+        parts.push(head + "\r\n\r\n" + value.replace(/\r\n?|\n/g, "\r\n") + "\r\n");
+      }
+    }
+    parts.push(`--${boundary}--\r\n`);
+    return { bytes: blobBytes.get(new Blob(parts)), type: `multipart/form-data; boundary=${boundary}` };
+  };
+
+  /* Headers */
+
+  const headerNameRe = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+  const forbiddenRequestHeaders = new Set([
+    "accept-charset", "accept-encoding", "access-control-request-headers",
+    "access-control-request-method", "connection", "content-length",
+    "cookie", "cookie2", "date", "dnt", "expect", "host", "keep-alive",
+    "origin", "referer", "set-cookie", "te", "trailer",
+    "transfer-encoding", "upgrade", "via"
+  ]);
+  const isForbiddenRequestHeader = (name) =>
+    forbiddenRequestHeaders.has(name) || name.startsWith("proxy-") || name.startsWith("sec-");
+
+  /* Strip leading and trailing HTTP whitespace */
+  const normaliseHeaderValue = (value) => String(value).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+
+  const headersGuard = new WeakMap();
+
+  class Headers {
+    #list = [];
+
+    constructor(init) {
+      if (init === undefined || init === null) {
+        return;
+      }
+      if (typeof init !== "object") {
+        throw new TypeError("Headers: init is not an object");
+      }
+      if (typeof init[Symbol.iterator] === "function") {
+        for (const pair of init) {
+          const p = Array.from(pair);
+          if (p.length !== 2) {
+            throw new TypeError("Headers: init pair must have two members");
+          }
+          this.append(p[0], p[1]);
+        }
+      } else {
+        for (const key of Reflect.ownKeys(init)) {
+          if (typeof key === "string" && Object.getOwnPropertyDescriptor(init, key).enumerable) {
+            this.append(key, init[key]);
+          }
+        }
+      }
+    }
+
+    #check(name, value) {
+      name = String(name);
+      if (!headerNameRe.test(name)) {
+        throw new TypeError(`Headers: invalid header name "${name}"`);
+      }
+      if (value !== undefined && /[\0\r\n]/.test(value)) {
+        throw new TypeError(`Headers: invalid value for "${name}"`);
+      }
+      if (headersGuard.get(this) === "immutable") {
+        throw new TypeError("Headers: headers are immutable");
+      }
+      return name.toLowerCase();
+    }
+
+    #ignored(lower) {
+      return headersGuard.get(this) === "request" && isForbiddenRequestHeader(lower);
+    }
+
+    append(name, value) {
+      value = normaliseHeaderValue(value);
+      const lower = this.#check(name, value);
+      if (!this.#ignored(lower)) {
+        this.#list.push([lower, value]);
+      }
+    }
+
+    delete(name) {
+      const lower = this.#check(name);
+      if (!this.#ignored(lower)) {
+        this.#list = this.#list.filter((h) => h[0] !== lower);
+      }
+    }
+
+    get(name) {
+      const lower = String(name).toLowerCase();
+      if (!headerNameRe.test(lower)) {
+        throw new TypeError(`Headers: invalid header name "${name}"`);
+      }
+      const values = this.#list.filter((h) => h[0] === lower).map((h) => h[1]);
+      return values.length === 0 ? null : values.join(", ");
+    }
+
+    getSetCookie() {
+      return this.#list.filter((h) => h[0] === "set-cookie").map((h) => h[1]);
+    }
+
+    has(name) {
+      const lower = String(name).toLowerCase();
+      if (!headerNameRe.test(lower)) {
+        throw new TypeError(`Headers: invalid header name "${name}"`);
+      }
+      return this.#list.some((h) => h[0] === lower);
+    }
+
+    set(name, value) {
+      value = normaliseHeaderValue(value);
+      const lower = this.#check(name, value);
+      if (this.#ignored(lower)) {
+        return;
+      }
+      const i = this.#list.findIndex((h) => h[0] === lower);
+      if (i < 0) {
+        this.#list.push([lower, value]);
+      } else {
+        this.#list[i] = [lower, value];
+        this.#list = this.#list.filter((h, j) => j <= i || h[0] !== lower);
+      }
+    }
+
+    /* sorted and combined, as iteration requires */
+    #sorted() {
+      const names = [...new Set(this.#list.map((h) => h[0]))].sort();
+      const out = [];
+      for (const name of names) {
+        if (name === "set-cookie") {
+          for (const v of this.getSetCookie()) {
+            out.push([name, v]);
+          }
+        } else {
+          out.push([name, this.get(name)]);
+        }
+      }
+      return out;
+    }
+
+    forEach(callback, thisArg) {
+      for (const [name, value] of this.#sorted()) {
+        callback.call(thisArg, value, name, this);
+      }
+    }
+    *entries() { yield* this.#sorted(); }
+    *keys() { for (const h of this.#sorted()) { yield h[0]; } }
+    *values() { for (const h of this.#sorted()) { yield h[1]; } }
+    [Symbol.iterator]() { return this.entries(); }
+    get [Symbol.toStringTag]() { return "Headers"; }
+  }
+  defineGlobal("Headers", Headers);
+
+  const makeHeaders = (init, guard) => {
+    const headers = new Headers(guard === "request" ? undefined : init);
+    if (guard === "request") {
+      headersGuard.set(headers, "request");
+      if (init !== undefined && init !== null) {
+        for (const [name, value] of new Headers(init)) {
+          headers.append(name, value);
+        }
+      }
+    } else if (guard) {
+      headersGuard.set(headers, guard);
+    }
+    return headers;
+  };
+
+  /* Bodies of requests and responses */
+
+  /* Extract a body and its content type from a body init value */
+  const extractBody = (init) => {
+    if (typeof init === "string") {
+      return { text: init, type: "text/plain;charset=UTF-8" };
+    }
+    if (init instanceof URLSearchParams) {
+      return { text: init.toString(), type: "application/x-www-form-urlencoded;charset=UTF-8" };
+    }
+    if (init instanceof Blob) {
+      return { bytes: blobBytes.get(init).slice(), type: init.type || null };
+    }
+    if (init instanceof FormData) {
+      return encodeMultipart(init);
+    }
+    const bytes = bufferBytes(init);
+    if (bytes) {
+      return { bytes, type: null };
+    }
+    return { text: String(init), type: "text/plain;charset=UTF-8" };
+  };
+
+  const bodyState = new WeakMap();
+
+  /* The bytes of a body, which may be held as text */
+  const bodyBytes = (state) => {
+    if (state.bytes === undefined) {
+      state.bytes = encodeUTF8(state.text);
+    }
+    return state.bytes;
+  };
+
+  /* Consume a body, as the Body mixin methods do */
+  const consumeBody = (obj, convert) => {
+    const state = bodyState.get(obj);
+    if (state.used) {
+      return Promise.reject(new TypeError("Body has already been used"));
+    }
+    if (state.body !== null) {
+      state.used = true;
+    }
+    try {
+      return Promise.resolve(convert(state.body));
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
+  const bodyText = (body) => {
+    if (body === null) {
+      return "";
+    }
+    return body.text !== undefined ? body.text : decodeText(body.bytes, "utf-8");
+  };
+
+  const bodyMixin = {
+    get body() {
+      /** \todo ReadableStream */
+      return null;
+    },
+    get bodyUsed() { return bodyState.get(this).used; },
+    arrayBuffer() {
+      return consumeBody(this, (b) => b === null ? new ArrayBuffer(0) : bodyBytes(b).slice().buffer);
+    },
+    bytes() {
+      return consumeBody(this, (b) => b === null ? new Uint8Array(0) : bodyBytes(b).slice());
+    },
+    blob() {
+      const type = this.headers.get("content-type") || "";
+      return consumeBody(this, (b) => new Blob(b === null ? [] : [bodyBytes(b)], { type }));
+    },
+    text() { return consumeBody(this, bodyText); },
+    json() { return consumeBody(this, (b) => JSON.parse(bodyText(b))); },
+    formData() {
+      const type = mimeEssence(this.headers.get("content-type"));
+      return consumeBody(this, (b) => {
+        if (type !== "application/x-www-form-urlencoded") {
+          /** \todo parse multipart/form-data */
+          throw new TypeError("formData: unsupported content type");
+        }
+        const fd = new FormData();
+        for (const [name, value] of new URLSearchParams(bodyText(b))) {
+          fd.append(name, value);
+        }
+        return fd;
+      });
+    }
+  };
+
+  const defineBody = (proto) => {
+    for (const name of Object.keys(bodyMixin)) {
+      const desc = Object.getOwnPropertyDescriptor(bodyMixin, name);
+      if (desc.get) {
+        Object.defineProperty(proto, name, { get: desc.get, enumerable: true, configurable: true });
+      } else {
+        Object.defineProperty(proto, name, {
+          value: desc.value, writable: true, enumerable: true, configurable: true
+        });
+      }
+    }
+  };
+
+  const copyBody = (body) => body === null ? null :
+    { text: body.text, bytes: body.bytes === undefined ? undefined : body.bytes.slice() };
+
+  /* Request */
+
+  const normalMethods = ["DELETE", "GET", "HEAD", "OPTIONS", "POST", "PUT", "PATCH"];
+  const requestState = new WeakMap();
+
+  class Request {
+    constructor(input, init = {}) {
+      let base;
+      if (input instanceof Request) {
+        base = requestState.get(input);
+        if (bodyState.get(input).used) {
+          throw new TypeError("Request: body has already been used");
+        }
+      } else {
+        let url;
+        try {
+          url = new URL(String(input), document.baseURI);
+        } catch (e) {
+          throw new TypeError(`Request: invalid URL "${input}"`);
+        }
+        if (url.username || url.password) {
+          throw new TypeError("Request: URL includes credentials");
+        }
+        base = {
+          url: url.href, method: "GET", headers: undefined, mode: "cors",
+          credentials: "same-origin", redirect: "follow", cache: "default",
+          referrer: "about:client", referrerPolicy: "", integrity: "",
+          keepalive: false, signal: null
+        };
+      }
+      init = init || {};
+      const state = Object.assign({}, base);
+      if (init.method !== undefined) {
+        let method = String(init.method);
+        if (!headerNameRe.test(method)) {
+          throw new TypeError(`Request: invalid method "${method}"`);
+        }
+        if (["CONNECT", "TRACE", "TRACK"].includes(method.toUpperCase())) {
+          throw new TypeError(`Request: forbidden method "${method}"`);
+        }
+        if (normalMethods.includes(method.toUpperCase())) {
+          method = method.toUpperCase();
+        }
+        state.method = method;
+      }
+      for (const key of ["mode", "credentials", "redirect", "cache", "referrerPolicy", "integrity"]) {
+        if (init[key] !== undefined) {
+          state[key] = String(init[key]);
+        }
+      }
+      if (state.mode === "navigate") {
+        throw new TypeError("Request: mode navigate is not allowed");
+      }
+      if (init.referrer !== undefined) {
+        state.referrer = String(init.referrer);
+      }
+      if (init.keepalive !== undefined) {
+        state.keepalive = !!init.keepalive;
+      }
+      state.signal = new AbortSignal(abortState);
+      const parentSignal = init.signal !== undefined ? init.signal :
+        (input instanceof Request ? input.signal : null);
+      if (parentSignal) {
+        if (parentSignal.aborted) {
+          signalAbort(state.signal, parentSignal.reason);
+        } else {
+          parentSignal.addEventListener("abort", () => signalAbort(state.signal, parentSignal.reason));
+        }
+      }
+      requestState.set(this, state);
+
+      const headersInit = init.headers !== undefined ? init.headers :
+        (input instanceof Request ? input.headers : undefined);
+      state.headers = makeHeaders(headersInit, "request");
+
+      let body = null;
+      if (init.body !== undefined && init.body !== null) {
+        if (state.method === "GET" || state.method === "HEAD") {
+          throw new TypeError("Request: GET and HEAD requests cannot have a body");
+        }
+        const extracted = extractBody(init.body);
+        body = { text: extracted.text, bytes: extracted.bytes };
+        if (extracted.type && !state.headers.has("content-type")) {
+          state.headers.append("content-type", extracted.type);
+        }
+      } else if (input instanceof Request) {
+        body = bodyState.get(input).body;
+        if (body !== null) {
+          bodyState.get(input).used = true;
+        }
+      }
+      bodyState.set(this, { body, used: false });
+    }
+
+    get method() { return requestState.get(this).method; }
+    get url() { return requestState.get(this).url; }
+    get headers() { return requestState.get(this).headers; }
+    get destination() { return ""; }
+    get referrer() {
+      const r = requestState.get(this).referrer;
+      return r === "about:client" ? "about:client" : r;
+    }
+    get referrerPolicy() { return requestState.get(this).referrerPolicy; }
+    get mode() { return requestState.get(this).mode; }
+    get credentials() { return requestState.get(this).credentials; }
+    get cache() { return requestState.get(this).cache; }
+    get redirect() { return requestState.get(this).redirect; }
+    get integrity() { return requestState.get(this).integrity; }
+    get keepalive() { return requestState.get(this).keepalive; }
+    get signal() { return requestState.get(this).signal; }
+
+    clone() {
+      if (bodyState.get(this).used) {
+        throw new TypeError("Request.clone: body has already been used");
+      }
+      const copy = new Request(this.url, {
+        method: this.method, headers: this.headers, mode: this.mode,
+        credentials: this.credentials, redirect: this.redirect,
+        cache: this.cache, referrerPolicy: this.referrerPolicy,
+        integrity: this.integrity, signal: this.signal
+      });
+      bodyState.get(copy).body = copyBody(bodyState.get(this).body);
+      return copy;
+    }
+
+    get [Symbol.toStringTag]() { return "Request"; }
+  }
+  defineBody(Request.prototype);
+  defineGlobal("Request", Request);
+
+  /* Response */
+
+  const responseState = new WeakMap();
+  const nullBodyStatus = [101, 103, 204, 205, 304];
+  const redirectStatus = [301, 302, 303, 307, 308];
+
+  class Response {
+    constructor(body = null, init = {}) {
+      init = init || {};
+      const status = init.status === undefined ? 200 : Number(init.status);
+      if (!Number.isInteger(status) || status < 200 || status > 599) {
+        throw new RangeError(`Response: invalid status ${init.status}`);
+      }
+      const statusText = init.statusText === undefined ? "" : String(init.statusText);
+      if (/[^\t\x20-\x7e\x80-\xff]/.test(statusText)) {
+        throw new TypeError("Response: invalid status text");
+      }
+      const headers = makeHeaders(init.headers, "response");
+      let state = null;
+      if (body !== null && body !== undefined) {
+        if (nullBodyStatus.includes(status)) {
+          throw new TypeError(`Response: status ${status} cannot have a body`);
+        }
+        const extracted = extractBody(body);
+        state = { text: extracted.text, bytes: extracted.bytes };
+        if (extracted.type && !headers.has("content-type")) {
+          headers.append("content-type", extracted.type);
+        }
+      }
+      responseState.set(this, {
+        type: "default", url: "", redirected: false, status, statusText, headers
+      });
+      bodyState.set(this, { body: state, used: false });
+    }
+
+    static error() {
+      const r = new Response(null, { status: 200 });
+      Object.assign(responseState.get(r), { type: "error", status: 0 });
+      headersGuard.set(r.headers, "immutable");
+      return r;
+    }
+
+    static redirect(url, status = 302) {
+      if (!redirectStatus.includes(status)) {
+        throw new RangeError(`Response.redirect: invalid status ${status}`);
+      }
+      const r = new Response(null, { status });
+      r.headers.set("location", new URL(String(url), document.baseURI).href);
+      headersGuard.set(r.headers, "immutable");
+      return r;
+    }
+
+    static json(data, init = {}) {
+      const text = JSON.stringify(data);
+      if (text === undefined) {
+        throw new TypeError("Response.json: data is not JSON serialisable");
+      }
+      const headers = new Headers(init && init.headers);
+      if (!headers.has("content-type")) {
+        headers.set("content-type", "application/json");
+      }
+      return new Response(text, Object.assign({}, init, { headers }));
+    }
+
+    get type() { return responseState.get(this).type; }
+    get url() { return responseState.get(this).url; }
+    get redirected() { return responseState.get(this).redirected; }
+    get status() { return responseState.get(this).status; }
+    get ok() { const s = this.status; return s >= 200 && s <= 299; }
+    get statusText() { return responseState.get(this).statusText; }
+    get headers() { return responseState.get(this).headers; }
+
+    clone() {
+      if (bodyState.get(this).used) {
+        throw new TypeError("Response.clone: body has already been used");
+      }
+      const state = responseState.get(this);
+      const copy = new Response(null, { status: 200 });
+      const headers = new Headers(state.headers);
+      if (headersGuard.get(state.headers)) {
+        headersGuard.set(headers, headersGuard.get(state.headers));
+      }
+      responseState.set(copy, Object.assign({}, state, { headers }));
+      bodyState.set(copy, { body: copyBody(bodyState.get(this).body), used: false });
+      return copy;
+    }
+
+    get [Symbol.toStringTag]() { return "Response"; }
+  }
+  defineBody(Response.prototype);
+  defineGlobal("Response", Response);
+
+  /* Parse the "name: value\r\n" headers the browser passes */
+  const parseHeaderLines = (text) => {
+    const list = [];
+    for (const line of text.split("\r\n")) {
+      const i = line.indexOf(":");
+      if (i > 0) {
+        list.push([line.slice(0, i), normaliseHeaderValue(line.slice(i + 1))]);
+      }
+    }
+    return list;
+  };
+
+  /* The origin of the document, for response types */
+  const documentOrigin = () => {
+    try {
+      return new URL(document.URL).origin;
+    } catch (e) {
+      return "null";
+    }
+  };
+
+  /* Flatten request headers into alternating names and values */
+  const flatHeaders = (headers) => {
+    const flat = [];
+    for (const [name, value] of headers) {
+      flat.push(name, value);
+    }
+    return flat;
+  };
+
+  /* The body to pass to the browser: a string or an ArrayBuffer */
+  const nativeBody = (body) => {
+    if (body === null) {
+      return undefined;
+    }
+    if (body.text !== undefined) {
+      return body.text;
+    }
+    return body.bytes.slice().buffer;
+  };
+
+  /* fetch */
+
+  defineMethods(global, {
+    fetch(input, init) {
+      return new Promise((resolve, reject) => {
+        const request = new Request(input, init);
+        const state = requestState.get(request);
+        const signal = request.signal;
+        if (signal.aborted) {
+          reject(signal.reason);
+          return;
+        }
+        let url;
+        try {
+          url = new URL(request.url);
+        } catch (e) {
+          reject(new TypeError("fetch: invalid URL"));
+          return;
+        }
+        if (state.mode === "same-origin" && url.origin !== documentOrigin()) {
+          reject(new TypeError("fetch: cross origin request in same-origin mode"));
+          return;
+        }
+        const body = bodyState.get(request);
+        if (body.body !== null) {
+          body.used = true;
+        }
+        let done = false;
+        let id;
+        const onAbort = () => {
+          if (!done) {
+            done = true;
+            native.fetchAbort(id);
+            reject(signal.reason);
+          }
+        };
+        try {
+          id = native.fetch(request.method, request.url, flatHeaders(request.headers),
+            nativeBody(body.body), state.credentials,
+            state.redirect === "error" ? "error" : "follow",
+            (result) => {
+              signal.removeEventListener("abort", onAbort);
+              if (done) {
+                return;
+              }
+              done = true;
+              if (result.error !== undefined) {
+                reject(new TypeError(`Failed to fetch: ${result.error}`));
+                return;
+              }
+              const response = new Response(null, { status: 200 });
+              let origin;
+              try {
+                origin = new URL(result.url).origin;
+              } catch (e) {
+                origin = "null";
+              }
+              const headers = new Headers(parseHeaderLines(result.headers));
+              headersGuard.set(headers, "immutable");
+              Object.assign(responseState.get(response), {
+                type: origin === documentOrigin() || result.url.startsWith("data:") ? "basic" : "cors",
+                url: result.url,
+                redirected: result.redirected,
+                status: result.status,
+                statusText: result.statusText,
+                headers
+              });
+              const empty = request.method === "HEAD" || nullBodyStatus.includes(result.status);
+              bodyState.get(response).body = empty ? null : { bytes: new Uint8Array(result.body) };
+              resolve(response);
+            });
+        } catch (e) {
+          reject(e instanceof TypeError ? e : new TypeError(String(e)));
+          return;
+        }
+        signal.addEventListener("abort", onAbort);
+      });
+    }
+  });
+
+  /* XMLHttpRequest */
+
+  const xhrEvents = ["loadstart", "progress", "abort", "error", "load", "timeout", "loadend"];
+
+  class XMLHttpRequestEventTarget extends EventTarget {
+    constructor() {
+      if (arguments[0] !== abortState) {
+        throw new TypeError("Illegal constructor");
+      }
+      super();
+    }
+    get [Symbol.toStringTag]() { return "XMLHttpRequestEventTarget"; }
+  }
+  defineEventHandlers(XMLHttpRequestEventTarget.prototype, xhrEvents);
+
+  class XMLHttpRequestUpload extends XMLHttpRequestEventTarget {
+    get [Symbol.toStringTag]() { return "XMLHttpRequestUpload"; }
+  }
+
+  const UNSENT = 0;
+  const OPENED = 1;
+  const HEADERS_RECEIVED = 2;
+  const LOADING = 3;
+  const DONE = 4;
+
+  class XMLHttpRequest extends XMLHttpRequestEventTarget {
+    #state = UNSENT;
+    #method = "GET";
+    #url = null;
+    #headers = null;
+    #send = false;
+    #id = undefined;
+    #timer = undefined;
+    #timeout = 0;
+    #withCredentials = false;
+    #responseType = "";
+    #overrideMime = null;
+    #upload = new XMLHttpRequestUpload(abortState);
+    #response = null;
+    #responseBytes = null;
+    #responseObject = undefined;
+    #errored = false;
+    #uploading = false;
+
+    constructor() {
+      super(abortState);
+    }
+
+    get readyState() { return this.#state; }
+    get upload() { return this.#upload; }
+    get timeout() { return this.#timeout; }
+    set timeout(ms) { this.#timeout = Math.max(0, Number(ms) || 0); }
+    get withCredentials() { return this.#withCredentials; }
+    set withCredentials(value) {
+      if (this.#state !== UNSENT && this.#state !== OPENED || this.#send) {
+        throw domError("InvalidStateError", "withCredentials cannot be set now");
+      }
+      this.#withCredentials = !!value;
+    }
+    get responseType() { return this.#responseType; }
+    set responseType(value) {
+      value = String(value);
+      if (!["", "arraybuffer", "blob", "document", "json", "text"].includes(value)) {
+        return;
+      }
+      if (this.#state === LOADING || this.#state === DONE) {
+        throw domError("InvalidStateError", "responseType cannot be set now");
+      }
+      this.#responseType = value;
+    }
+
+    open(method, url, async = true, username = null, password = null) {
+      method = String(method);
+      if (!headerNameRe.test(method)) {
+        throw domError("SyntaxError", `invalid method "${method}"`);
+      }
+      if (["CONNECT", "TRACE", "TRACK"].includes(method.toUpperCase())) {
+        throw domError("SecurityError", `forbidden method "${method}"`);
+      }
+      if (normalMethods.includes(method.toUpperCase())) {
+        method = method.toUpperCase();
+      }
+      let parsed;
+      try {
+        parsed = new URL(String(url), document.baseURI);
+      } catch (e) {
+        throw domError("SyntaxError", `invalid URL "${url}"`);
+      }
+      if (arguments.length > 2 && !async) {
+        /* the browser cannot block scripts while a request is made */
+        throw domError("InvalidAccessError", "synchronous XMLHttpRequest is not supported");
+      }
+      if (username !== null && username !== undefined) {
+        parsed.username = String(username);
+      }
+      if (password !== null && password !== undefined) {
+        parsed.password = String(password);
+      }
+      this.#cancel();
+      this.#method = method;
+      this.#url = parsed.href;
+      this.#headers = makeHeaders(undefined, "request");
+      this.#send = false;
+      this.#response = null;
+      this.#responseBytes = null;
+      this.#responseObject = undefined;
+      this.#errored = false;
+      if (this.#state !== OPENED) {
+        this.#state = OPENED;
+        this.dispatchEvent(makeEvent("readystatechange"));
+      }
+    }
+
+    setRequestHeader(name, value) {
+      if (this.#state !== OPENED || this.#send) {
+        throw domError("InvalidStateError", "setRequestHeader called before open or after send");
+      }
+      name = String(name);
+      value = normaliseHeaderValue(value);
+      if (!headerNameRe.test(name) || /[\0\r\n]/.test(value)) {
+        throw domError("SyntaxError", `invalid header "${name}"`);
+      }
+      const lower = name.toLowerCase();
+      if (isForbiddenRequestHeader(lower)) {
+        return;
+      }
+      const old = this.#headers.get(lower);
+      this.#headers.set(lower, old === null ? value : `${old}, ${value}`);
+    }
+
+    send(body = null) {
+      if (this.#state !== OPENED || this.#send) {
+        throw domError("InvalidStateError", "send called before open or twice");
+      }
+      let nbody;
+      if (this.#method === "GET" || this.#method === "HEAD") {
+        body = null;
+      }
+      if (body !== null && body !== undefined) {
+        let extracted;
+        if (body instanceof global.Document) {
+          const root = body.documentElement;
+          extracted = { text: root ? root.outerHTML : "",
+                        type: "text/html;charset=UTF-8" };
+        } else {
+          extracted = extractBody(body);
+        }
+        nbody = nativeBody({ text: extracted.text, bytes: extracted.bytes });
+        if (extracted.type && !this.#headers.has("content-type")) {
+          this.#headers.set("content-type", extracted.type);
+        }
+      }
+      this.#send = true;
+      this.#errored = false;
+      this.#uploading = nbody !== undefined;
+      this.dispatchEvent(makeProgressEvent("loadstart", 0, 0));
+      if (this.#state !== OPENED || !this.#send) {
+        /* a listener called open or abort */
+        return;
+      }
+      if (this.#uploading) {
+        this.#upload.dispatchEvent(makeProgressEvent("loadstart", 0, 0));
+      }
+      try {
+        this.#id = native.fetch(this.#method, this.#url, flatHeaders(this.#headers), nbody,
+          this.#withCredentials ? "include" : "same-origin", "follow",
+          (result) => this.#complete(result));
+      } catch (e) {
+        Promise.resolve().then(() => this.#complete({ error: String(e) }));
+      }
+      if (this.#timeout > 0) {
+        this.#timer = setTimeout(() => {
+          this.#timer = undefined;
+          this.#fail("timeout");
+        }, this.#timeout);
+      }
+    }
+
+    abort() {
+      const active = this.#send;
+      this.#cancel();
+      if ((this.#state === OPENED && active) || this.#state === HEADERS_RECEIVED ||
+          this.#state === LOADING) {
+        this.#failEvents("abort");
+      }
+      if (this.#state === DONE) {
+        this.#state = UNSENT;
+        this.#response = null;
+      }
+    }
+
+    /* Stop the request in progress */
+    #cancel() {
+      if (this.#id !== undefined) {
+        native.fetchAbort(this.#id);
+        this.#id = undefined;
+      }
+      if (this.#timer !== undefined) {
+        clearTimeout(this.#timer);
+        this.#timer = undefined;
+      }
+      this.#send = false;
+    }
+
+    /* Fail the request with an error, abort or timeout */
+    #fail(type) {
+      this.#cancel();
+      this.#failEvents(type);
+    }
+
+    #failEvents(type) {
+      this.#state = DONE;
+      this.#send = false;
+      this.#errored = true;
+      this.#response = null;
+      this.#responseBytes = null;
+      this.dispatchEvent(makeEvent("readystatechange"));
+      if (this.#uploading) {
+        this.#uploading = false;
+        this.#upload.dispatchEvent(makeProgressEvent(type, 0, 0));
+        this.#upload.dispatchEvent(makeProgressEvent("loadend", 0, 0));
+      }
+      this.dispatchEvent(makeProgressEvent(type, 0, 0));
+      this.dispatchEvent(makeProgressEvent("loadend", 0, 0));
+    }
+
+    /* The response has arrived */
+    #complete(result) {
+      this.#id = undefined;
+      if (this.#timer !== undefined) {
+        clearTimeout(this.#timer);
+        this.#timer = undefined;
+      }
+      if (!this.#send) {
+        return;
+      }
+      if (result.error !== undefined) {
+        this.#send = false;
+        this.#failEvents("error");
+        return;
+      }
+      const headers = new Headers(parseHeaderLines(result.headers));
+      this.#response = {
+        status: result.status, statusText: result.statusText,
+        url: result.url, headers, rawHeaders: result.headers
+      };
+      this.#responseBytes = new Uint8Array(result.body);
+      const total = this.#responseBytes.length;
+
+      if (this.#uploading) {
+        this.#uploading = false;
+        this.#upload.dispatchEvent(makeProgressEvent("progress", 0, 0));
+        this.#upload.dispatchEvent(makeProgressEvent("load", 0, 0));
+        this.#upload.dispatchEvent(makeProgressEvent("loadend", 0, 0));
+      }
+      this.#state = HEADERS_RECEIVED;
+      this.dispatchEvent(makeEvent("readystatechange"));
+      if (this.#state !== HEADERS_RECEIVED || !this.#send) {
+        return;
+      }
+      this.#state = LOADING;
+      this.dispatchEvent(makeEvent("readystatechange"));
+      if (this.#state !== LOADING || !this.#send) {
+        return;
+      }
+      this.dispatchEvent(makeProgressEvent("progress", total, total));
+      if (this.#state !== LOADING || !this.#send) {
+        return;
+      }
+      this.#state = DONE;
+      this.#send = false;
+      this.dispatchEvent(makeEvent("readystatechange"));
+      this.dispatchEvent(makeProgressEvent("load", total, total));
+      this.dispatchEvent(makeProgressEvent("loadend", total, total));
+    }
+
+    get status() { return this.#response && !this.#errored ? this.#response.status : 0; }
+    get statusText() { return this.#response && !this.#errored ? this.#response.statusText : ""; }
+    get responseURL() { return this.#response ? this.#response.url.replace(/#.*$/, "") : ""; }
+
+    getResponseHeader(name) {
+      if (this.#response === null || this.#state < HEADERS_RECEIVED) {
+        return null;
+      }
+      return this.#response.headers.get(String(name));
+    }
+
+    getAllResponseHeaders() {
+      if (this.#response === null || this.#state < HEADERS_RECEIVED) {
+        return "";
+      }
+      let out = "";
+      for (const [name, value] of this.#response.headers) {
+        out += `${name}: ${value}\r\n`;
+      }
+      return out;
+    }
+
+    overrideMimeType(mime) {
+      if (this.#state === LOADING || this.#state === DONE) {
+        throw domError("InvalidStateError", "overrideMimeType called too late");
+      }
+      this.#overrideMime = String(mime);
+    }
+
+    /* The MIME type of the response */
+    #mime() {
+      if (this.#overrideMime !== null) {
+        return this.#overrideMime;
+      }
+      const type = this.#response ? this.#response.headers.get("content-type") : null;
+      return type || "text/xml";
+    }
+
+    #text() {
+      if (this.#responseBytes === null) {
+        return "";
+      }
+      if (this.#responseObject === undefined || typeof this.#responseObject !== "string") {
+        this.#responseObject = decodeText(this.#responseBytes, mimeCharset(this.#mime()));
+      }
+      return this.#responseObject;
+    }
+
+    get responseText() {
+      if (this.#responseType !== "" && this.#responseType !== "text") {
+        throw domError("InvalidStateError", "responseText needs responseType text");
+      }
+      if (this.#state !== LOADING && this.#state !== DONE) {
+        return "";
+      }
+      return this.#text();
+    }
+
+    get responseXML() {
+      if (this.#responseType !== "" && this.#responseType !== "document") {
+        throw domError("InvalidStateError", "responseXML needs responseType document");
+      }
+      /** \todo parse XML and HTML responses */
+      return null;
+    }
+
+    get response() {
+      const type = this.#responseType;
+      if (type === "" || type === "text") {
+        return this.responseText;
+      }
+      if (this.#state !== DONE || this.#errored) {
+        return null;
+      }
+      if (this.#responseObject !== undefined) {
+        return this.#responseObject;
+      }
+      const bytes = this.#responseBytes;
+      if (type === "arraybuffer") {
+        this.#responseObject = bytes.slice().buffer;
+      } else if (type === "blob") {
+        this.#responseObject = new Blob([bytes], { type: this.#mime() });
+      } else if (type === "json") {
+        try {
+          this.#responseObject = JSON.parse(decodeText(bytes, "utf-8"));
+        } catch (e) {
+          this.#responseObject = null;
+        }
+      } else {
+        this.#responseObject = null;
+      }
+      return this.#responseObject;
+    }
+
+    get [Symbol.toStringTag]() { return "XMLHttpRequest"; }
+  }
+  defineEventHandlers(XMLHttpRequest.prototype, ["readystatechange"]);
+  for (const [name, value] of Object.entries({ UNSENT, OPENED, HEADERS_RECEIVED, LOADING, DONE })) {
+    Object.defineProperty(XMLHttpRequest, name, { value, enumerable: true });
+    Object.defineProperty(XMLHttpRequest.prototype, name, { value, enumerable: true });
+  }
+
+  defineGlobal("XMLHttpRequestEventTarget", XMLHttpRequestEventTarget);
+  defineGlobal("XMLHttpRequestUpload", XMLHttpRequestUpload);
+  defineGlobal("XMLHttpRequest", XMLHttpRequest);
 })();

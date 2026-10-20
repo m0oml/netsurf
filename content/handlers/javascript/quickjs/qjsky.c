@@ -45,11 +45,15 @@
 #include "utils/utils.h"
 #include "utils/log.h"
 #include "utils/corestrings.h"
+#include "utils/nsurl.h"
+#include "utils/utf8.h"
 #include "content/content.h"
+#include "content/llcache.h"
 #include "netsurf/browser_window.h"
 
 #include "javascript/js.h"
 #include "javascript/content.h"
+#include "javascript/script_fetch.h"
 #include "html/private.h"
 
 #include "quickjs/binding.h"
@@ -109,6 +113,20 @@ struct jsthread {
 	duk_context *ctx; /**< The compatibility context */
 	JSValue global; /**< The global object */
 	void *window_priv; /**< private data of the global Window */
+	struct qjsky_fetch *fetches; /**< requests in progress */
+	int32_t next_fetch_id; /**< identifier for the next request */
+};
+
+/**
+ * A network request made by a script.
+ */
+struct qjsky_fetch {
+	struct qjsky_fetch *next; /**< next request of the thread */
+	struct qjsky_fetch *prev; /**< previous request of the thread */
+	jsthread *thread; /**< thread which made the request */
+	struct script_fetch *sf; /**< the request */
+	JSValue callback; /**< function to call with the response */
+	int32_t id; /**< identifier given to the script */
 };
 
 
@@ -1335,6 +1353,329 @@ qjsky_native_scroll_to(JSContext *jctx,
 }
 
 
+static void qjsky_enter_thread(jsthread *thread);
+static void qjsky_leave_thread(jsthread *thread);
+
+
+/**
+ * Remove a request from its thread and free it.
+ */
+static void qjsky_fetch_free(struct qjsky_fetch *qf)
+{
+	jsthread *thread = qf->thread;
+
+	if (qf->prev != NULL) {
+		qf->prev->next = qf->next;
+	} else {
+		thread->fetches = qf->next;
+	}
+	if (qf->next != NULL) {
+		qf->next->prev = qf->prev;
+	}
+	JS_FreeValue(thread->jctx, qf->callback);
+	free(qf);
+}
+
+
+/**
+ * Abort every request a thread has in progress.
+ */
+static void qjsky_fetch_abort_all(jsthread *thread)
+{
+	while (thread->fetches != NULL) {
+		script_fetch_abort(thread->fetches->sf);
+		qjsky_fetch_free(thread->fetches);
+	}
+}
+
+
+/**
+ * Pass the response to a request to the script which made it.
+ */
+static void
+qjsky_fetch_done(const struct script_fetch_response *response, void *pw)
+{
+	struct qjsky_fetch *qf = pw;
+	jsthread *thread = qf->thread;
+	JSContext *jctx = thread->jctx;
+	JSValue callback = JS_DupValue(jctx, qf->callback);
+	JSValue res;
+	JSValue ret;
+
+	/* the request is freed after this callback */
+	qf->sf = NULL;
+	qjsky_fetch_free(qf);
+
+	res = JS_NewObject(jctx);
+	if (response->error != NULL) {
+		JS_SetPropertyStr(jctx, res, "error",
+				  JS_NewString(jctx, response->error));
+	} else {
+		JS_SetPropertyStr(jctx, res, "status",
+				  JS_NewInt32(jctx, response->status));
+		JS_SetPropertyStr(jctx, res, "statusText",
+				  JS_NewString(jctx, response->status_text));
+		JS_SetPropertyStr(jctx, res, "url",
+				  JS_NewString(jctx, nsurl_access(response->url)));
+		JS_SetPropertyStr(jctx, res, "redirected",
+				  JS_NewBool(jctx, response->redirected));
+		JS_SetPropertyStr(jctx, res, "headers",
+				  JS_NewString(jctx, response->headers));
+		JS_SetPropertyStr(jctx, res, "body",
+				  JS_NewArrayBufferCopy(jctx, response->body,
+							response->body_len));
+	}
+
+	qjsky_enter_thread(thread);
+	qjsky_enter_js(thread->heap, true);
+	ret = JS_Call(jctx, callback, JS_UNDEFINED, 1, (JSValueConst *)&res);
+	if (JS_IsException(ret)) {
+		qjsky_dump_exception(jctx);
+	}
+	JS_FreeValue(jctx, ret);
+	JS_FreeValue(jctx, res);
+	JS_FreeValue(jctx, callback);
+	qjsky_leave_js(thread->heap);
+	qjsky_leave_thread(thread);
+}
+
+
+/**
+ * Native network request.
+ *
+ * __netsurf_fetch(method, url, headers, body, credentials, redirect,
+ * callback) starts a request and returns its identifier.  headers is an
+ * array of alternating names and values, body is undefined, a string or
+ * an ArrayBuffer, credentials is "omit", "same-origin" or "include" and
+ * redirect is "follow" or "error".  callback is called with an object
+ * holding the response, or an error property for a network error.
+ */
+static JSValue
+qjsky_native_fetch(JSContext *jctx,
+		   JSValueConst this_val,
+		   int argc,
+		   JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	struct script_fetch_request request;
+	struct qjsky_fetch *qf = NULL;
+	const char *method = NULL;
+	const char *url_s = NULL;
+	const char *credentials = NULL;
+	const char *redirect = NULL;
+	const char *body_s = NULL;
+	const char **headers = NULL;
+	uint32_t nheaders = 0;
+	uint32_t i;
+	JSValue ret = JS_EXCEPTION;
+	nserror err;
+
+	memset(&request, 0, sizeof request);
+
+	if (argc < 7 || !JS_IsFunction(jctx, argv[6])) {
+		return JS_ThrowTypeError(jctx, "bad arguments");
+	}
+	if (htmlc == NULL || htmlc->base_url == NULL) {
+		return JS_ThrowTypeError(jctx, "no document");
+	}
+
+	method = JS_ToCString(jctx, argv[0]);
+	url_s = JS_ToCString(jctx, argv[1]);
+	credentials = JS_ToCString(jctx, argv[4]);
+	redirect = JS_ToCString(jctx, argv[5]);
+	if (method == NULL || url_s == NULL ||
+	    credentials == NULL || redirect == NULL) {
+		goto out;
+	}
+
+	if (JS_IsArray(argv[2])) {
+		int64_t len;
+
+		if (JS_GetLength(jctx, argv[2], &len) < 0) {
+			goto out;
+		}
+		nheaders = (uint32_t)min(len, 256);
+		headers = calloc(nheaders + 1, sizeof(char *));
+		if (headers == NULL) {
+			JS_ThrowOutOfMemory(jctx);
+			goto out;
+		}
+		for (i = 0; i < nheaders; i++) {
+			JSValue v = JS_GetPropertyUint32(jctx, argv[2], i);
+
+			headers[i] = JS_ToCString(jctx, v);
+			JS_FreeValue(jctx, v);
+			if (headers[i] == NULL) {
+				goto out;
+			}
+		}
+	}
+
+	if (JS_IsString(argv[3])) {
+		size_t len;
+
+		body_s = JS_ToCStringLen(jctx, &len, argv[3]);
+		if (body_s == NULL) {
+			goto out;
+		}
+		request.body = (const uint8_t *)body_s;
+		request.body_len = len;
+	} else if (!JS_IsUndefined(argv[3]) && !JS_IsNull(argv[3])) {
+		size_t len;
+		uint8_t *buf = JS_GetArrayBuffer(jctx, &len, argv[3]);
+
+		if (buf == NULL) {
+			goto out;
+		}
+		/* never NULL for a body, even an empty one */
+		request.body = len == 0 ? (const uint8_t *)"" : buf;
+		request.body_len = len;
+	}
+
+	err = nsurl_join(htmlc->base_url, url_s, &request.url);
+	if (err != NSERROR_OK) {
+		JS_ThrowTypeError(jctx, "invalid URL");
+		goto out;
+	}
+
+	request.document = llcache_handle_get_url(htmlc->base.llcache);
+	request.method = method;
+	request.headers = headers;
+	request.redirect_error = strcmp(redirect, "error") == 0;
+	if (strcmp(credentials, "omit") == 0) {
+		request.credentials = SCRIPT_FETCH_CREDENTIALS_OMIT;
+	} else if (strcmp(credentials, "include") == 0) {
+		request.credentials = SCRIPT_FETCH_CREDENTIALS_INCLUDE;
+	} else {
+		request.credentials = SCRIPT_FETCH_CREDENTIALS_SAME_ORIGIN;
+	}
+
+	qf = calloc(1, sizeof *qf);
+	if (qf == NULL) {
+		JS_ThrowOutOfMemory(jctx);
+		goto out;
+	}
+
+	err = script_fetch_start(&request, qjsky_fetch_done, qf, &qf->sf);
+	if (err != NSERROR_OK) {
+		free(qf);
+		JS_ThrowTypeError(jctx, "request failed");
+		goto out;
+	}
+
+	qf->thread = thread;
+	qf->callback = JS_DupValue(jctx, argv[6]);
+	qf->id = ++thread->next_fetch_id;
+	qf->next = thread->fetches;
+	if (qf->next != NULL) {
+		qf->next->prev = qf;
+	}
+	thread->fetches = qf;
+
+	ret = JS_NewInt32(jctx, qf->id);
+
+out:
+	if (request.url != NULL) {
+		nsurl_unref(request.url);
+	}
+	if (headers != NULL) {
+		for (i = 0; i < nheaders; i++) {
+			JS_FreeCString(jctx, headers[i]);
+		}
+		free(headers);
+	}
+	JS_FreeCString(jctx, body_s);
+	JS_FreeCString(jctx, method);
+	JS_FreeCString(jctx, url_s);
+	JS_FreeCString(jctx, credentials);
+	JS_FreeCString(jctx, redirect);
+	return ret;
+}
+
+
+/**
+ * Native abort of a network request: __netsurf_fetch_abort(id).
+ */
+static JSValue
+qjsky_native_fetch_abort(JSContext *jctx,
+			 JSValueConst this_val,
+			 int argc,
+			 JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	struct qjsky_fetch *qf;
+	int32_t id;
+
+	if (argc < 1 || JS_ToInt32(jctx, &id, argv[0]) < 0) {
+		return JS_EXCEPTION;
+	}
+
+	for (qf = thread->fetches; qf != NULL; qf = qf->next) {
+		if (qf->id == id) {
+			script_fetch_abort(qf->sf);
+			qjsky_fetch_free(qf);
+			break;
+		}
+	}
+
+	return JS_UNDEFINED;
+}
+
+
+/**
+ * Native text decoding: __netsurf_decode(buffer, charset).
+ *
+ * Decodes an ArrayBuffer in the named character set, or UTF-8 if the
+ * character set is unknown.  Invalid sequences are replaced.
+ */
+static JSValue
+qjsky_native_decode(JSContext *jctx,
+		    JSValueConst this_val,
+		    int argc,
+		    JSValueConst *argv)
+{
+	const char *charset = NULL;
+	uint8_t *buf;
+	size_t len;
+	JSValue ret;
+
+	if (argc < 1) {
+		return JS_ThrowTypeError(jctx, "bad arguments");
+	}
+	buf = JS_GetArrayBuffer(jctx, &len, argv[0]);
+	if (buf == NULL) {
+		return JS_EXCEPTION;
+	}
+	if (argc > 1 && JS_IsString(argv[1])) {
+		charset = JS_ToCString(jctx, argv[1]);
+	}
+
+	if (charset != NULL && charset[0] != '\0' &&
+	    strcasecmp(charset, "utf-8") != 0 &&
+	    strcasecmp(charset, "utf8") != 0) {
+		char *utf8;
+		size_t utf8_len;
+
+		if (len > 0 && utf8_from_enc((const char *)buf, charset, len,
+					     &utf8, &utf8_len) == NSERROR_OK) {
+			ret = JS_NewStringLen(jctx, utf8, utf8_len);
+			free(utf8);
+			JS_FreeCString(jctx, charset);
+			return ret;
+		}
+	}
+	JS_FreeCString(jctx, charset);
+
+	/* skip a byte order mark */
+	if (len >= 3 && buf[0] == 0xef && buf[1] == 0xbb && buf[2] == 0xbf) {
+		buf += 3;
+		len -= 3;
+	}
+	return JS_NewStringLen(jctx, (const char *)buf, len);
+}
+
+
 /**
  * Native functions for webcompat.js, which removes them from the
  * global object once it has them.
@@ -1344,6 +1685,9 @@ static const JSCFunctionListEntry qjsky_native_funcs[] = {
 	JS_CFUNC_DEF("__netsurf_viewport", 0, qjsky_native_viewport),
 	JS_CFUNC_DEF("__netsurf_style", 2, qjsky_native_style),
 	JS_CFUNC_DEF("__netsurf_scroll_to", 2, qjsky_native_scroll_to),
+	JS_CFUNC_DEF("__netsurf_fetch", 7, qjsky_native_fetch),
+	JS_CFUNC_DEF("__netsurf_fetch_abort", 1, qjsky_native_fetch_abort),
+	JS_CFUNC_DEF("__netsurf_decode", 2, qjsky_native_decode),
 };
 
 
@@ -1620,6 +1964,7 @@ nserror js_closethread(jsthread *thread)
 
 	/* Closing down the extant thread */
 	NSLOG(qjsky, DEBUG, "Closing down extant thread %p in heap %p", thread, thread->heap);
+	qjsky_fetch_abort_all(thread);
 	duk_get_global_string(CTX, MAGIC(closedownThread));
 	dukky_pcall(CTX, 0, true);
 
@@ -1641,6 +1986,8 @@ static void qjsky_destroythread(jsthread *thread)
 	assert(thread->pending_destroy == true);
 
 	NSLOG(qjsky, DEBUG, "Destroying thread %p in heap %p", thread, heap);
+
+	qjsky_fetch_abort_all(thread);
 
 	if (thread->window_priv != NULL) {
 		/* Closing down the extant thread */
