@@ -1693,6 +1693,55 @@ qjsky_native_decode(JSContext *jctx,
 }
 
 
+static void qjsky_window_event(jsthread *thread, dom_event *evt, dom_string *type, struct dom_document *doc, dom_event_flow_phase phase);
+
+/**
+ * Native dispatch of an event at the Window: __netsurf_window_dispatch(event).
+ *
+ * The Window is not a node, so libdom cannot dispatch at it.  Returns
+ * false if the event was cancelled.
+ */
+static JSValue
+qjsky_native_window_dispatch(JSContext *jctx,
+			     JSValueConst this_val,
+			     int argc,
+			     JSValueConst *argv)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	void *priv = NULL;
+	dom_string *type = NULL;
+	bool prevented = false;
+	dom_event *evt;
+	int idx;
+
+	if (argc < 1) {
+		return JS_ThrowTypeError(jctx, "bad arguments");
+	}
+	idx = qjsky_resolve(thread, argv[0], &priv);
+	if (!qjsky_class_is_a(idx, QJSKY_PROTO_EVENT) || (priv == NULL)) {
+		return JS_ThrowTypeError(jctx, "dispatchEvent: argument is not an Event");
+	}
+	evt = ((event_private_t *)priv)->evt;
+
+	if ((dom_event_get_type(evt, &type) != DOM_NO_ERR) || (type == NULL)) {
+		return JS_NewBool(jctx, true);
+	}
+	(void) dom_event_set_is_trusted(evt, false);
+
+	qjsky_window_event(thread, evt, type,
+			   (htmlc != NULL) ? htmlc->document : NULL,
+			   DOM_AT_TARGET);
+	dom_string_unref(type);
+
+	if (dom_event_is_default_prevented(evt, &prevented) != DOM_NO_ERR) {
+		prevented = false;
+	}
+
+	return JS_NewBool(jctx, !prevented);
+}
+
+
 /**
  * Native functions for webcompat.js, which removes them from the
  * global object once it has them.
@@ -1705,6 +1754,7 @@ static const JSCFunctionListEntry qjsky_native_funcs[] = {
 	JS_CFUNC_DEF("__netsurf_fetch", 7, qjsky_native_fetch),
 	JS_CFUNC_DEF("__netsurf_fetch_abort", 1, qjsky_native_fetch_abort),
 	JS_CFUNC_DEF("__netsurf_decode", 2, qjsky_native_decode),
+	JS_CFUNC_DEF("__netsurf_window_dispatch", 1, qjsky_native_window_dispatch),
 };
 
 
@@ -3182,11 +3232,12 @@ static void
 qjsky_call_listeners(duk_context *ctx,
 		     dom_string *name,
 		     dom_event *evt,
-		     dom_event_flow_phase phase,
+		     bool capture,
 		     dom_event_target *targ)
 {
 	dom_exception exc;
 	duk_uarridx_t idx;
+	duk_uarridx_t copy_idx;
 	event_listener_flags flags;
 
 	/* ... */
@@ -3202,22 +3253,29 @@ qjsky_call_listeners(duk_context *ctx,
 	duk_push_array(ctx);
 	/* ... sublisteners copy */
 	idx = 0;
+	copy_idx = 0;
 	while (duk_get_prop_index(ctx, -2, idx)) {
 		/* ... sublisteners copy handler */
 		duk_get_prop_index(ctx, -1, 1);
 		/* ... sublisteners copy handler flags */
-		if ((event_listener_flags)duk_to_int(ctx, -1) & ELF_ONCE) {
+		flags = (event_listener_flags)duk_to_int(ctx, -1);
+		if ((flags & ELF_ONCE) &&
+		    (!!(flags & ELF_CAPTURE) == capture)) {
+			/* only once listeners which are called now go */
 			duk_dup(ctx, -4);
 			/* ... subl copy handler flags subl */
 			dukky_shuffle_array(ctx, idx);
 			duk_pop(ctx);
 			/* ... subl copy handler flags */
+		} else {
+			/* the next listener is not shuffled down */
+			idx++;
 		}
 		duk_pop(ctx);
 		/* ... sublisteners copy handler */
-		duk_put_prop_index(ctx, -2, idx);
+		duk_put_prop_index(ctx, -2, copy_idx);
 		/* ... sublisteners copy */
-		idx++;
+		copy_idx++;
 	}
 	/* ... sublisteners copy undefined */
 	duk_pop(ctx);
@@ -3241,8 +3299,7 @@ qjsky_call_listeners(duk_context *ctx,
 		flags = (event_listener_flags)duk_get_int(ctx, -1);
 		duk_pop(ctx);
 		/* ... copy handler callback */
-		if (((phase == DOM_CAPTURING_PHASE) && !(flags & ELF_CAPTURE)) ||
-		    ((phase != DOM_CAPTURING_PHASE) && (flags & ELF_CAPTURE))) {
+		if (!!(flags & ELF_CAPTURE) != capture) {
 			duk_pop_2(ctx);
 			/* ... copy */
 			continue;
@@ -3309,11 +3366,14 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 		return;
 	}
 
-	/* If we're capturing right now, we skip the 'event handler'
-	 * and go straight to the extras
+	/* Capturing listeners are called by qjsky_capture_event_handler()
+	 * and the event handler is not called while capturing
 	 */
-	if (phase == DOM_CAPTURING_PHASE)
-		goto handle_extras;
+	if (phase == DOM_CAPTURING_PHASE) {
+		dom_node_unref(targ);
+		dom_string_unref(name);
+		return;
+	}
 
 	/* ... */
 	if (dukky_push_node(ctx, (dom_node *)targ) == false) {
@@ -3354,7 +3414,40 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 	}
 	duk_pop(ctx);
 handle_extras:
-	qjsky_call_listeners(ctx, name, evt, phase, targ);
+	qjsky_call_listeners(ctx, name, evt, false, targ);
+
+	dom_node_unref(targ);
+	dom_string_unref(name);
+}
+
+
+/**
+ * Handle an event in the capturing phase or at its target, for the
+ * listeners added with capture.
+ *
+ * Each node has a capturing and a non capturing listener for an event,
+ * added in that order so capturing listeners are called first at the
+ * target.
+ */
+static void qjsky_capture_event_handler(dom_event *evt, void *pw)
+{
+	duk_context *ctx = (duk_context *)pw;
+	dom_string *name;
+	dom_exception exc;
+	dom_event_target *targ;
+
+	exc = dom_event_get_type(evt, &name);
+	if (exc != DOM_NO_ERR) {
+		return;
+	}
+
+	exc = dom_event_get_current_target(evt, &targ);
+	if (exc != DOM_NO_ERR) {
+		dom_string_unref(name);
+		return;
+	}
+
+	qjsky_call_listeners(ctx, name, evt, true, targ);
 
 	dom_node_unref(targ);
 	dom_string_unref(name);
@@ -3407,12 +3500,26 @@ void dukky_register_event_listener_for(duk_context *ctx,
 		return;
 	}
 
-	/* Otherwise add an event listener to the element */
+	/* Otherwise add event listeners to the element, the capturing
+	 * one first so its listeners are called first at the target
+	 */
+	exc = dom_event_listener_create(qjsky_capture_event_handler, ctx,
+					&listen);
+	if (exc != DOM_NO_ERR) return;
+	exc = dom_event_target_add_event_listener(ele, name, listen, true);
+	dom_event_listener_unref(listen);
+	if (exc != DOM_NO_ERR) {
+		NSLOG(qjsky, DEBUG,
+		      "Unable to register listener for %p.%*s", ele,
+		      (int)dom_string_length(name), dom_string_data(name));
+		return;
+	}
+
 	exc = dom_event_listener_create(dukky_generic_event_handler, ctx,
 					&listen);
 	if (exc != DOM_NO_ERR) return;
 	exc = dom_event_target_add_event_listener(
-		ele, name, listen, capture);
+		ele, name, listen, false);
 	if (exc != DOM_NO_ERR) {
 		NSLOG(qjsky, DEBUG,
 		      "Unable to register listener for %p.%*s", ele,
@@ -3485,7 +3592,8 @@ void dukky_shuffle_array(duk_context *ctx, duk_uarridx_t idx)
 		idx++;
 	}
 	/* ... somearr undefined */
-	duk_del_prop_index(ctx, -2, idx + 1);
+	/* the last element has been copied down, so it goes */
+	duk_del_prop_index(ctx, -2, idx);
 	duk_pop(ctx);
 }
 
@@ -3671,7 +3779,12 @@ qjsky_window_event(jsthread *thread,
 	}
 
 	/* ... */
-	qjsky_call_listeners(CTX, type, evt, phase, NULL);
+	if (phase != DOM_BUBBLING_PHASE) {
+		qjsky_call_listeners(CTX, type, evt, true, NULL);
+	}
+	if (phase != DOM_CAPTURING_PHASE) {
+		qjsky_call_listeners(CTX, type, evt, false, NULL);
+	}
 }
 
 

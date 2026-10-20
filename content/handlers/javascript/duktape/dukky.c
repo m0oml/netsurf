@@ -1180,6 +1180,7 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 	dom_event_target *targ;
 	dom_event_flow_phase phase;
 	duk_uarridx_t idx;
+	duk_uarridx_t copy_idx;
 	event_listener_flags flags;
 
 	NSLOG(dukky, DEBUG, "Handling an event in duktape interface...");
@@ -1278,6 +1279,7 @@ handle_extras:
 	duk_push_array(ctx);
 	/* ... sublisteners copy */
 	idx = 0;
+	copy_idx = 0;
 	while (duk_get_prop_index(ctx, -2, idx)) {
 		/* ... sublisteners copy handler */
 		duk_get_prop_index(ctx, -1, 1);
@@ -1288,12 +1290,15 @@ handle_extras:
 			dukky_shuffle_array(ctx, idx);
 			duk_pop(ctx);
 			/* ... subl copy handler flags */
+		} else {
+			/* the next listener is not shuffled down */
+			idx++;
 		}
 		duk_pop(ctx);
 		/* ... sublisteners copy handler */
-		duk_put_prop_index(ctx, -2, idx);
+		duk_put_prop_index(ctx, -2, copy_idx);
 		/* ... sublisteners copy */
-		idx++;
+		copy_idx++;
 	}
 	/* ... sublisteners copy undefined */
 	duk_pop(ctx);
@@ -1495,7 +1500,8 @@ void dukky_shuffle_array(duk_context *ctx, duk_uarridx_t idx)
 		idx++;
 	}
 	/* ... somearr undefined */
-	duk_del_prop_index(ctx, -2, idx + 1);
+	/* the last element has been copied down, so it goes */
+	duk_del_prop_index(ctx, -2, idx);
 	duk_pop(ctx);
 }
 

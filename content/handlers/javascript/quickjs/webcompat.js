@@ -39,12 +39,14 @@
     /* abort a network request by id */
     fetchAbort: global.__netsurf_fetch_abort,
     /* decode an ArrayBuffer in a character set */
-    decode: global.__netsurf_decode
+    decode: global.__netsurf_decode,
+    /* call the Window's listeners for an event, false if cancelled */
+    windowDispatch: global.__netsurf_window_dispatch
   };
   for (const name of ["__netsurf_geometry", "__netsurf_viewport",
                       "__netsurf_style", "__netsurf_scroll_to",
                       "__netsurf_fetch", "__netsurf_fetch_abort",
-                      "__netsurf_decode"]) {
+                      "__netsurf_decode", "__netsurf_window_dispatch"]) {
     delete global[name];
   }
 
@@ -2878,6 +2880,71 @@
     return { capture: !!options.capture, once: !!options.once, signal: options.signal || null };
   };
 
+  /* The binding for nodes and the window only takes a capture flag, so
+   * options are handled here.  A once listener is added as a wrapper,
+   * kept by the callback so it can still be removed by it.
+   */
+  const nativeOnce = new WeakMap();
+  const nativeOnceKey = (type, capture) => String(type) + (capture ? "|capture" : "|bubble");
+
+  const nativeRemove = (target, type, callback, capture) => {
+    const byKey = nativeOnce.get(target);
+    const wrappers = byKey && byKey.get(nativeOnceKey(type, capture));
+    if (wrappers && wrappers.has(callback)) {
+      const wrapper = wrappers.get(callback);
+      wrappers.delete(callback);
+      nativeTarget.remove.call(target, type, wrapper, capture);
+      return;
+    }
+    nativeTarget.remove.call(target, type, callback, capture);
+  };
+
+  const nativeAdd = (target, type, callback, options) => {
+    if (typeof options !== "object" || options === null) {
+      return nativeTarget.add.call(target, type, callback, !!options);
+    }
+    const opts = listenerOptions(options);
+    if (callback === null || callback === undefined) {
+      return undefined;
+    }
+    if (opts.signal && opts.signal.aborted) {
+      return undefined;
+    }
+    if (opts.once) {
+      let byKey = nativeOnce.get(target);
+      if (byKey === undefined) {
+        byKey = new Map();
+        nativeOnce.set(target, byKey);
+      }
+      const key = nativeOnceKey(type, opts.capture);
+      let wrappers = byKey.get(key);
+      if (wrappers === undefined) {
+        wrappers = new Map();
+        byKey.set(key, wrappers);
+      }
+      if (wrappers.has(callback)) {
+        return undefined;
+      }
+      const wrapper = function (event) {
+        nativeRemove(target, type, callback, opts.capture);
+        if (typeof callback === "function") {
+          return callback.call(this, event);
+        }
+        return callback.handleEvent(event);
+      };
+      wrappers.set(callback, wrapper);
+      nativeTarget.add.call(target, type, wrapper, opts.capture);
+    } else {
+      nativeTarget.add.call(target, type, callback, opts.capture);
+    }
+    if (opts.signal) {
+      opts.signal.addEventListener("abort", () => {
+        nativeRemove(target, type, callback, opts.capture);
+      });
+    }
+    return undefined;
+  };
+
   const EventTarget = function EventTarget() {
     if (new.target === undefined) {
       throw new TypeError("Constructor EventTarget requires 'new'");
@@ -2903,7 +2970,7 @@
     addEventListener(type, callback, options) {
       const map = scriptTargets.get(this);
       if (map === undefined) {
-        return nativeTarget.add.apply(this, arguments);
+        return nativeAdd(this, type, callback, options);
       }
       if (callback === null || callback === undefined) {
         return undefined;
@@ -2934,7 +3001,7 @@
     removeEventListener(type, callback, options) {
       const map = scriptTargets.get(this);
       if (map === undefined) {
-        return nativeTarget.remove.apply(this, arguments);
+        return nativeRemove(this, type, callback, listenerOptions(options).capture);
       }
       const capture = listenerOptions(options).capture;
       const list = map.get(String(type));
@@ -2951,6 +3018,19 @@
     dispatchEvent(event) {
       const map = scriptTargets.get(this);
       if (map === undefined) {
+        if (this === global) {
+          if (!(event instanceof global.Event)) {
+            throw new TypeError("dispatchEvent: argument is not an Event");
+          }
+          setEventMember(event, "target", global);
+          setEventMember(event, "currentTarget", global);
+          setEventMember(event, "eventPhase", 2);
+          setEventMember(event, "isTrusted", false);
+          const result = native.windowDispatch(event);
+          setEventMember(event, "currentTarget", null);
+          setEventMember(event, "eventPhase", 0);
+          return result;
+        }
         return nativeTarget.dispatch.apply(this, arguments);
       }
       if (!(event instanceof global.Event)) {
