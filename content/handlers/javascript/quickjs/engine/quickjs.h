@@ -460,6 +460,10 @@ static inline bool JS_VALUE_IS_NAN(JSValue v)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* NetSurf: with JS_EVAL_FLAG_COMPILE_ONLY, do not resolve the modules a
+   module imports, which the host does with JS_ResolveModule() once it
+   has fetched them */
+#define JS_EVAL_FLAG_NO_RESOLVE (1 << 8)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
@@ -1236,6 +1240,23 @@ JS_EXTERN void JS_SetModuleNormalizeFunc2(JSRuntime *rt,
 JS_EXTERN JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m);
 JS_EXTERN JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m);
 JS_EXTERN JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m);
+
+/* NetSurf additions.  import() calls the hook, if set, instead of loading
+   the module itself.  The hook settles the promise with resolving_funcs,
+   which it must dup to keep, and returns -1 with an exception pending to
+   reject it at once. */
+typedef int JSDynamicImportHook(JSContext *ctx, JSValueConst basename,
+                                JSValueConst specifier,
+                                JSValueConst attributes,
+                                JSValueConst *resolving_funcs, void *opaque);
+JS_EXTERN void JS_SetDynamicImportHook(JSRuntime *rt,
+                                       JSDynamicImportHook *hook,
+                                       void *opaque);
+/* find a compiled module by name, or NULL */
+JS_EXTERN JSModuleDef *JS_FindLoadedModule(JSContext *ctx, const char *name);
+/* the specifiers of the modules a compiled module imports */
+JS_EXTERN int JS_GetModuleRequestCount(JSModuleDef *m);
+JS_EXTERN JSAtom JS_GetModuleRequest(JSContext *ctx, JSModuleDef *m, int index);
 
 /* associate a JSValue to a C module */
 JS_EXTERN int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val);

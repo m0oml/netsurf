@@ -129,6 +129,64 @@ void js_destroythread(jsthread *thread);
 bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *name);
 
 /**
+ * A module script and the modules it imports.
+ */
+struct js_module;
+
+/**
+ * Status of loading a module script.
+ */
+enum js_module_status {
+	JS_MODULE_READY, /**< the module can be executed */
+	JS_MODULE_PENDING, /**< imported modules are being fetched */
+	JS_MODULE_FAILED /**< the module or one it imports failed to load */
+};
+
+/**
+ * Callback for a module script whose imported modules have been fetched.
+ *
+ * \param pw The private data passed to js_module_load()
+ * \param module The module, which can be executed if the status is
+ *               JS_MODULE_READY and is otherwise freed after the callback
+ * \param status JS_MODULE_READY or JS_MODULE_FAILED
+ */
+typedef void (js_module_cb)(void *pw, struct js_module *module, enum js_module_status status);
+
+/**
+ * Check if the javascript engine runs module scripts.
+ *
+ * \return true if module scripts are supported
+ */
+bool js_supports_modules(void);
+
+/**
+ * Load a module script, fetching the modules it imports.
+ *
+ * \param thread The thread to load the module in
+ * \param txt The source of the module
+ * \param txtlen The length of the source
+ * \param url The URL of the module, or the base URL of the document for
+ *            a module in the document
+ * \param is_inline Whether the module is in the document
+ * \param cb Callback for a module whose imports are being fetched
+ * \param pw Private data for cb
+ * \param module_out Updated with the module unless loading failed
+ * \return JS_MODULE_READY if the module can be executed now,
+ *         JS_MODULE_PENDING if cb will be called once its imports have
+ *         been fetched, or JS_MODULE_FAILED
+ */
+enum js_module_status js_module_load(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *url, bool is_inline, js_module_cb *cb, void *pw, struct js_module **module_out);
+
+/**
+ * Execute a module script which has loaded, and free it.
+ *
+ * \param thread The thread the module was loaded in
+ * \param module The module
+ * \return true if the module was executed
+ */
+bool js_module_exec(jsthread *thread, struct js_module *module);
+
+/**
  * fire an event at a dom node
  */
 bool js_fire_event(jsthread *thread, const char *type, struct dom_document *doc, struct dom_node *target);

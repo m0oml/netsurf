@@ -405,6 +405,9 @@ struct JSRuntime {
     } u;
     JSModuleCheckSupportedImportAttributes *module_check_attrs;
     void *module_loader_opaque;
+    /* NetSurf: host handling of import() */
+    JSDynamicImportHook *dynamic_import_hook;
+    void *dynamic_import_opaque;
     /* timestamp for internal use in module evaluation */
     int64_t module_async_evaluation_next_timestamp;
 
@@ -31765,6 +31768,41 @@ JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m)
     return JS_DupAtom(ctx, m->module_name);
 }
 
+/* NetSurf additions, so a host can fetch the modules a module imports
+   before resolving it */
+
+void JS_SetDynamicImportHook(JSRuntime *rt, JSDynamicImportHook *hook,
+                             void *opaque)
+{
+    rt->dynamic_import_hook = hook;
+    rt->dynamic_import_opaque = opaque;
+}
+
+JSModuleDef *JS_FindLoadedModule(JSContext *ctx, const char *name)
+{
+    JSModuleDef *m;
+    JSAtom atom;
+
+    atom = JS_NewAtom(ctx, name);
+    if (atom == JS_ATOM_NULL)
+        return NULL;
+    m = js_find_loaded_module_by_name(ctx, atom);
+    JS_FreeAtom(ctx, atom);
+    return m;
+}
+
+int JS_GetModuleRequestCount(JSModuleDef *m)
+{
+    return m->req_module_entries_count;
+}
+
+JSAtom JS_GetModuleRequest(JSContext *ctx, JSModuleDef *m, int index)
+{
+    if (index < 0 || index >= m->req_module_entries_count)
+        return JS_ATOM_NULL;
+    return JS_DupAtom(ctx, m->req_module_entries[index].module_name);
+}
+
 JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m)
 {
     JSValue obj;
@@ -32024,6 +32062,15 @@ static JSValue js_dynamic_import(JSContext *ctx, JSValueConst specifier,
     args[2] = basename_val;
     args[3] = specifier_str;
     args[4] = attributes;
+
+    if (ctx->rt->dynamic_import_hook) {
+        /* NetSurf: the host loads the module, which may need fetching */
+        if (ctx->rt->dynamic_import_hook(ctx, basename_val, specifier_str,
+                                         attributes, vc(resolving_funcs),
+                                         ctx->rt->dynamic_import_opaque) < 0)
+            goto exception;
+        goto done;
+    }
 
     /* cannot run JS_LoadModuleInternal synchronously because it would
        cause an unexpected recursion in js_evaluate_module() */
@@ -38257,7 +38304,8 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     /* Could add a flag to avoid resolution if necessary */
     if (m) {
         m->func_obj = fun_obj;
-        if (js_resolve_module(ctx, m) < 0)
+        if (!(flags & JS_EVAL_FLAG_NO_RESOLVE) &&
+            js_resolve_module(ctx, m) < 0)
             goto fail1;
         fun_obj = JS_NewModuleValue(ctx, m);
     }

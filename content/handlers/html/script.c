@@ -72,6 +72,25 @@ nserror html_script_exec(html_content *c, bool allow_defer)
 			continue;
 		}
 
+		if ((s->type == HTML_SCRIPT_MODULE) &&
+		    (s->async || allow_defer)) {
+			struct js_module *module = s->module;
+
+			if ((module == NULL) || s->module_pending) {
+				/* still being fetched */
+				continue;
+			}
+
+			s->module = NULL;
+			s->already_started = true;
+			js_module_exec(c->jsthread, module);
+			have_run_something = true;
+
+			/* the scripts may have been reallocated */
+			s = &(c->scripts[i]);
+			continue;
+		}
+
 		if ((s->type == HTML_SCRIPT_ASYNC) ||
 		    (allow_defer && (s->type == HTML_SCRIPT_DEFER))) {
 			/* ensure script content is present */
@@ -144,6 +163,8 @@ html_process_new_script(html_content *c,
 	nscript->ready_exec = false;
 	nscript->async = false;
 	nscript->defer = false;
+	nscript->module = NULL;
+	nscript->module_pending = false;
 
 	nscript->type = type;
 
@@ -375,6 +396,262 @@ convert_script_sync_cb(hlcache_handle *script,
 }
 
 /**
+ * Continue loading a document after a script has been fetched.
+ */
+static nserror html_script_fetched(html_content *parent)
+{
+	/* if there are no active fetches remaining begin post parse
+	 * conversion
+	 */
+	if (html_can_begin_conversion(parent)) {
+		html_begin_conversion(parent);
+	}
+
+	/* if we have already started converting though, then we can handle
+	 * the scripts as they come in.
+	 */
+	else if (parent->conversion_begun) {
+		return html_script_exec(parent, false);
+	}
+
+	return NSERROR_OK;
+}
+
+
+/**
+ * Callback for a module script whose imported modules have been fetched.
+ */
+static void
+html_script_module_cb(void *pw,
+		      struct js_module *module,
+		      enum js_module_status status)
+{
+	html_content *parent = pw;
+	unsigned int i;
+	struct html_script *s;
+
+	for (i = 0, s = parent->scripts; i != parent->scripts_count; i++, s++) {
+		if (s->type == HTML_SCRIPT_MODULE && s->module == module)
+			break;
+	}
+
+	assert(i != parent->scripts_count);
+
+	s->module_pending = false;
+	if (status != JS_MODULE_READY) {
+		/* the module has been freed */
+		s->module = NULL;
+		s->already_started = true;
+	}
+
+	parent->base.active--;
+	NSLOG(netsurf, INFO, "%d fetches active", parent->base.active);
+
+	html_script_fetched(parent);
+}
+
+
+/**
+ * Load a module script, fetching the modules it imports.
+ *
+ * The fetches of imported modules are counted as active, so deferred
+ * module scripts are ready to execute when the document has been parsed.
+ *
+ * \param c The content the script is in
+ * \param idx The index of the script
+ * \param data The source of the module
+ * \param size The length of the source
+ * \param url The URL of the module, or base URL for a module in the
+ *            document
+ * \param is_inline Whether the module is in the document
+ */
+static void
+html_script_module_load(html_content *c,
+			unsigned int idx,
+			const uint8_t *data,
+			size_t size,
+			const char *url,
+			bool is_inline)
+{
+	struct js_module *module = NULL;
+	enum js_module_status status;
+
+	status = js_module_load(c->jsthread, data, size, url, is_inline,
+				html_script_module_cb, c, &module);
+
+	c->scripts[idx].module = module;
+	switch (status) {
+	case JS_MODULE_PENDING:
+		c->scripts[idx].module_pending = true;
+		c->base.active++;
+		NSLOG(netsurf, INFO, "%d fetches active", c->base.active);
+		break;
+
+	case JS_MODULE_READY:
+		break;
+
+	default:
+		c->scripts[idx].already_started = true;
+		break;
+	}
+}
+
+
+/**
+ * Callback for module scripts
+ */
+static nserror
+convert_script_module_cb(hlcache_handle *script,
+			 const hlcache_event *event,
+			 void *pw)
+{
+	html_content *parent = pw;
+	unsigned int i;
+	struct html_script *s;
+
+	/* Find script */
+	for (i = 0, s = parent->scripts; i != parent->scripts_count; i++, s++) {
+		if (s->type == HTML_SCRIPT_MODULE && s->data.handle == script)
+			break;
+	}
+
+	assert(i != parent->scripts_count);
+
+	switch (event->type) {
+	case CONTENT_MSG_DONE:
+		NSLOG(netsurf, INFO, "module script %d done '%s'", i,
+		      nsurl_access(hlcache_handle_get_url(script)));
+		parent->base.active--;
+		NSLOG(netsurf, INFO, "%d fetches active", parent->base.active);
+
+		if ((parent->jsthread != NULL) &&
+		    (content_get_type(script) == CONTENT_JS)) {
+			const uint8_t *data;
+			size_t size;
+
+			data = content_get_source_data(script, &size);
+			html_script_module_load(parent, i, data, size,
+					nsurl_access(hlcache_handle_get_url(script)),
+					false);
+		} else {
+			s->already_started = true;
+		}
+		break;
+
+	case CONTENT_MSG_ERROR:
+		NSLOG(netsurf, INFO, "module script %s failed: %s",
+		      nsurl_access(hlcache_handle_get_url(script)),
+		      event->data.errordata.errormsg);
+
+		hlcache_handle_release(script);
+		s->data.handle = NULL;
+		s->already_started = true;
+		parent->base.active--;
+		NSLOG(netsurf, INFO, "%d fetches active", parent->base.active);
+		break;
+
+	default:
+		return NSERROR_OK;
+	}
+
+	return html_script_fetched(parent);
+}
+
+
+/**
+ * process a module script
+ *
+ * Module scripts are deferred unless they are async.  Their source and
+ * the modules they import are fetched while the document is parsed.
+ */
+static dom_hubbub_error
+exec_module_script(html_content *c,
+		   dom_node *node,
+		   dom_string *mimetype,
+		   dom_string *src)
+{
+	struct html_script *nscript;
+	unsigned int idx;
+	bool async = false;
+	dom_exception exc;
+
+	exc = dom_element_has_attribute(node, corestring_dom_async, &async);
+	if (exc != DOM_NO_ERR) {
+		return DOM_HUBBUB_OK; /* dom error */
+	}
+
+	nscript = html_process_new_script(c, mimetype, HTML_SCRIPT_MODULE);
+	if (nscript == NULL) {
+		content_broadcast_error(&c->base, NSERROR_NOMEM, NULL);
+		return DOM_HUBBUB_NOMEM;
+	}
+	idx = c->scripts_count - 1;
+
+	/* After parse completed, all scripts are essentially async */
+	nscript->async = async || c->parse_completed;
+	nscript->data.handle = NULL;
+
+	if (src == NULL) {
+		dom_string *script;
+
+		exc = dom_node_get_text_content(node, &script);
+		if ((exc != DOM_NO_ERR) || (script == NULL)) {
+			nscript->already_started = true;
+			return DOM_HUBBUB_OK; /* no contents, skip */
+		}
+
+		NSLOG(netsurf, INFO, "module script %i inline", idx);
+		html_script_module_load(c, idx,
+				(const uint8_t *)dom_string_data(script),
+				dom_string_byte_length(script),
+				nsurl_access(c->base_url), true);
+		dom_string_unref(script);
+	} else {
+		nserror ns_error;
+		nsurl *joined;
+		hlcache_child_context child;
+
+		ns_error = nsurl_join(c->base_url, dom_string_data(src),
+				      &joined);
+		if (ns_error != NSERROR_OK) {
+			nscript->already_started = true;
+			return DOM_HUBBUB_OK;
+		}
+
+		NSLOG(netsurf, INFO, "module script %i '%s'", idx,
+		      nsurl_access(joined));
+
+		child.charset = c->encoding;
+		child.quirks = c->base.quirks;
+
+		ns_error = hlcache_handle_retrieve(joined,
+						   0,
+						   content_get_url(&c->base),
+						   NULL,
+						   convert_script_module_cb,
+						   c,
+						   &child,
+						   CONTENT_SCRIPT,
+						   &c->scripts[idx].data.handle);
+		nsurl_unref(joined);
+
+		if (ns_error != NSERROR_OK) {
+			c->scripts[idx].data.handle = NULL;
+			c->scripts[idx].already_started = true;
+			NSLOG(netsurf, INFO, "Fetch failed with error %d",
+			      ns_error);
+		} else {
+			c->base.active++;
+			NSLOG(netsurf, INFO, "%d fetches active",
+			      c->base.active);
+		}
+	}
+
+	return DOM_HUBBUB_OK;
+}
+
+
+/**
  * process a script with a src tag
  */
 static dom_hubbub_error
@@ -569,6 +846,7 @@ html_process_script(void *ctx, dom_node *node)
 	dom_exception exc; /* returned by libdom functions */
 	dom_string *src, *mimetype;
 	dom_hubbub_error err = DOM_HUBBUB_OK;
+	bool nomodule = false;
 
 	/* ensure javascript context is available */
 	/* We should only ever be here if scripting was enabled for this
@@ -595,10 +873,26 @@ html_process_script(void *ctx, dom_node *node)
 	}
 
 	exc = dom_element_get_attribute(node, corestring_dom_src, &src);
-	if (exc != DOM_NO_ERR || src == NULL) {
+	if (exc != DOM_NO_ERR) {
+		src = NULL;
+	}
+
+	if (js_supports_modules() &&
+	    dom_string_caseless_lwc_isequal(mimetype, corestring_lwc_module)) {
+		err = exec_module_script(c, node, mimetype, src);
+	} else if (js_supports_modules() &&
+		   (dom_element_has_attribute(node, corestring_dom_nomodule,
+					      &nomodule) == DOM_NO_ERR) &&
+		   nomodule) {
+		/* the fallback for browsers without module scripts */
+		err = DOM_HUBBUB_OK;
+	} else if (src == NULL) {
 		err = exec_inline_script(c, node, mimetype);
 	} else {
 		err = exec_src_script(c, node, mimetype, src);
+	}
+
+	if (src != NULL) {
 		dom_string_unref(src);
 	}
 
@@ -653,6 +947,11 @@ nserror html_script_free(html_content *html)
 		case HTML_SCRIPT_ASYNC:
 			/* fallthrough */
 		case HTML_SCRIPT_DEFER:
+			/* fallthrough */
+		case HTML_SCRIPT_MODULE:
+			/* the module itself belongs to the javascript
+			 * thread, which frees it
+			 */
 			if (html->scripts[i].data.handle != NULL) {
 				hlcache_handle_release(html->scripts[i].data.handle);
 			}

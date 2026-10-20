@@ -920,6 +920,36 @@ void dukky_log_stack_frame(duk_context *ctx, const char * reason)
 
 
 /* exported interface documented in js.h */
+bool js_supports_modules(void)
+{
+	return false;
+}
+
+
+/* exported interface documented in js.h */
+enum js_module_status
+js_module_load(jsthread *thread,
+	       const uint8_t *txt,
+	       size_t txtlen,
+	       const char *url,
+	       bool is_inline,
+	       js_module_cb *cb,
+	       void *pw,
+	       struct js_module **module_out)
+{
+	/* Duktape has no module scripts */
+	return JS_MODULE_FAILED;
+}
+
+
+/* exported interface documented in js.h */
+bool js_module_exec(jsthread *thread, struct js_module *module)
+{
+	return false;
+}
+
+
+/* exported interface documented in js.h */
 bool
 js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *name)
 {

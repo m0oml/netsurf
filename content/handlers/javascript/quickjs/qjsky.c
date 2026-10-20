@@ -48,8 +48,11 @@
 #include "utils/nsurl.h"
 #include "utils/utf8.h"
 #include "content/content.h"
+#include "content/hlcache.h"
 #include "content/llcache.h"
+#include "utils/ascii.h"
 #include "netsurf/browser_window.h"
+#include "netsurf/content.h"
 
 #include "javascript/js.h"
 #include "javascript/content.h"
@@ -126,6 +129,9 @@ struct jsthread {
 	void *window_priv; /**< private data of the global Window */
 	struct qjsky_fetch *fetches; /**< requests in progress */
 	int32_t next_fetch_id; /**< identifier for the next request */
+	struct qjsky_module *modules; /**< modules fetched or compiled */
+	struct js_module *module_loads; /**< module scripts and imports */
+	unsigned int inline_modules; /**< number of modules in the document */
 };
 
 /**
@@ -1702,6 +1708,860 @@ static const JSCFunctionListEntry qjsky_native_funcs[] = {
 };
 
 
+/*
+ * Module scripts
+ *
+ * QuickJS resolves the modules a module imports synchronously, while
+ * NetSurf fetches them asynchronously.  So a module is only resolved
+ * once every module it imports, directly or not, has been fetched and
+ * compiled.  Compiled modules are kept by QuickJS in the context and
+ * found by name, which is the URL each was requested with; this side
+ * only remembers which URLs have been fetched, never pointers to the
+ * compiled modules, as QuickJS frees unresolved modules when any
+ * module fails to resolve.
+ */
+
+/**
+ * A module known to a thread, by URL.
+ */
+struct qjsky_module {
+	struct qjsky_module *next; /**< next module of the thread */
+	jsthread *thread; /**< thread the module belongs to */
+	char *url; /**< name of the module */
+	enum js_module_status status; /**< pending while being fetched */
+	struct hlcache_handle *handle; /**< fetch of the source, or NULL */
+};
+
+/**
+ * A module script, or a call of import(), and the modules it imports.
+ */
+struct js_module {
+	struct js_module *next; /**< next of the thread */
+	struct js_module *prev; /**< previous of the thread */
+	jsthread *thread; /**< thread the module is loaded in */
+	char *url; /**< name of the module */
+	bool waiting; /**< whether imported modules are being fetched */
+	js_module_cb *cb; /**< callback for a module script */
+	void *pw; /**< private data for cb */
+	JSValue resolving_funcs[2]; /**< promise functions for import() */
+};
+
+static void qjsky_module_check_loads(jsthread *thread);
+
+
+/**
+ * Check if a module specifier starts with a URL scheme.
+ */
+static bool qjsky_module_has_scheme(const char *s)
+{
+	if (!ascii_is_alpha(*s)) {
+		return false;
+	}
+	for (s++; *s != '\0'; s++) {
+		if (*s == ':') {
+			return true;
+		}
+		if (!ascii_is_alphanumerical(*s) &&
+		    (*s != '+') && (*s != '-') && (*s != '.')) {
+			return false;
+		}
+	}
+	return false;
+}
+
+
+/**
+ * Resolve a module specifier against the module importing it.
+ *
+ * Module normalisation callback for QuickJS.  Bare specifiers, which
+ * need an import map, are not supported.
+ *
+ * \param jctx The context importing the module
+ * \param base Name of the importing module or script
+ * \param name The specifier
+ * \param opaque The heap
+ * \return The absolute URL of the module, allocated with js_malloc(), or
+ *         NULL with an exception pending
+ */
+static char *
+qjsky_module_normalize(JSContext *jctx,
+		       const char *base,
+		       const char *name,
+		       void *opaque)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	html_content *htmlc = qjsky_html_content(thread);
+	nsurl *base_url = NULL;
+	nsurl *joined;
+	char *ret;
+	nserror err;
+
+	if ((strncmp(name, "/", 1) != 0) &&
+	    (strncmp(name, "./", 2) != 0) &&
+	    (strncmp(name, "../", 3) != 0) &&
+	    !qjsky_module_has_scheme(name)) {
+		JS_ThrowTypeError(jctx, "module specifier \"%s\" is not a "
+				  "relative or absolute URL", name);
+		return NULL;
+	}
+
+	/* classic scripts are named by URL, unless they are inline */
+	if ((base != NULL) && qjsky_module_has_scheme(base)) {
+		if (nsurl_create(base, &base_url) != NSERROR_OK) {
+			base_url = NULL;
+		}
+	}
+	if ((base_url == NULL) && (htmlc != NULL) && (htmlc->base_url != NULL)) {
+		base_url = nsurl_ref(htmlc->base_url);
+	}
+	if (base_url == NULL) {
+		JS_ThrowTypeError(jctx, "no base URL for module \"%s\"", name);
+		return NULL;
+	}
+
+	err = nsurl_join(base_url, name, &joined);
+	nsurl_unref(base_url);
+	if (err != NSERROR_OK) {
+		JS_ThrowTypeError(jctx, "invalid module URL \"%s\"", name);
+		return NULL;
+	}
+
+	ret = js_strdup(jctx, nsurl_access(joined));
+	nsurl_unref(joined);
+
+	return ret;
+}
+
+
+/**
+ * Module loader callback for QuickJS.
+ *
+ * Modules are compiled before they are resolved, so QuickJS only asks
+ * for modules which could not be loaded.
+ */
+static JSModuleDef *
+qjsky_module_loader(JSContext *jctx, const char *name, void *opaque)
+{
+	JS_ThrowReferenceError(jctx, "module \"%s\" has not been loaded", name);
+	return NULL;
+}
+
+
+/**
+ * Find a module a thread knows by URL.
+ */
+static struct qjsky_module *
+qjsky_module_find(jsthread *thread, const char *url)
+{
+	struct qjsky_module *mod;
+
+	for (mod = thread->modules; mod != NULL; mod = mod->next) {
+		if (strcmp(mod->url, url) == 0) {
+			return mod;
+		}
+	}
+	return NULL;
+}
+
+
+/**
+ * Add a module to the modules a thread knows.
+ */
+static struct qjsky_module *
+qjsky_module_new(jsthread *thread, const char *url)
+{
+	struct qjsky_module *mod;
+
+	mod = calloc(1, sizeof(*mod));
+	if (mod == NULL) {
+		return NULL;
+	}
+	mod->url = strdup(url);
+	if (mod->url == NULL) {
+		free(mod);
+		return NULL;
+	}
+	mod->thread = thread;
+	mod->status = JS_MODULE_PENDING;
+	mod->next = thread->modules;
+	thread->modules = mod;
+
+	return mod;
+}
+
+
+/**
+ * Compile a module, which QuickJS keeps by name.
+ *
+ * \param thread The thread to compile the module in
+ * \param name The name of the module
+ * \param txt The source
+ * \param txtlen The length of the source
+ * \param meta_url The URL for import.meta.url
+ * \return JS_MODULE_READY, or JS_MODULE_FAILED if it does not compile
+ */
+static enum js_module_status
+qjsky_module_compile(jsthread *thread,
+		     const char *name,
+		     const uint8_t *txt,
+		     size_t txtlen,
+		     const char *meta_url)
+{
+	JSContext *jctx = thread->jctx;
+	JSModuleDef *m;
+	JSValue val;
+	JSValue meta;
+	char *src;
+
+	/* JS_Eval requires the source to be NUL terminated */
+	src = malloc(txtlen + 1);
+	if (src == NULL) {
+		return JS_MODULE_FAILED;
+	}
+	memcpy(src, txt, txtlen);
+	src[txtlen] = '\0';
+
+	qjsky_enter_js(thread->heap, true);
+	val = JS_Eval(jctx, src, txtlen, name,
+		      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY |
+		      JS_EVAL_FLAG_NO_RESOLVE);
+	free(src);
+	if (JS_IsException(val)) {
+		qjsky_dump_exception(jctx);
+		qjsky_leave_js(thread->heap);
+		return JS_MODULE_FAILED;
+	}
+
+	m = JS_VALUE_GET_PTR(val);
+	meta = JS_GetImportMeta(jctx, m);
+	if (!JS_IsException(meta)) {
+		JS_DefinePropertyValueStr(jctx, meta, "url",
+					  JS_NewString(jctx, meta_url),
+					  JS_PROP_C_W_E);
+	}
+	JS_FreeValue(jctx, meta);
+
+	/* QuickJS keeps the module, so the reference can go */
+	JS_FreeValue(jctx, val);
+	qjsky_leave_js(thread->heap);
+
+	return JS_MODULE_READY;
+}
+
+
+/**
+ * Callback for the fetch of an imported module.
+ */
+static nserror
+qjsky_module_fetch_cb(hlcache_handle *handle,
+		      const hlcache_event *event,
+		      void *pw)
+{
+	struct qjsky_module *mod = pw;
+	jsthread *thread = mod->thread;
+
+	switch (event->type) {
+	case CONTENT_MSG_DONE:
+		if (content_get_type(handle) != CONTENT_JS) {
+			NSLOG(qjsky, INFO, "module %s is not javascript",
+			      mod->url);
+			mod->status = JS_MODULE_FAILED;
+		} else {
+			const uint8_t *data;
+			size_t size;
+
+			data = content_get_source_data(handle, &size);
+			mod->status = qjsky_module_compile(thread, mod->url,
+					data, size,
+					nsurl_access(hlcache_handle_get_url(handle)));
+		}
+		break;
+
+	case CONTENT_MSG_ERROR:
+		NSLOG(qjsky, INFO, "module %s failed: %s", mod->url,
+		      event->data.errordata.errormsg);
+		mod->status = JS_MODULE_FAILED;
+		break;
+
+	default:
+		return NSERROR_OK;
+	}
+
+	hlcache_handle_release(handle);
+	mod->handle = NULL;
+
+	qjsky_enter_thread(thread);
+	qjsky_module_check_loads(thread);
+	qjsky_leave_thread(thread);
+
+	return NSERROR_OK;
+}
+
+
+/**
+ * Start fetching a module a thread does not know yet.
+ */
+static struct qjsky_module *
+qjsky_module_fetch(jsthread *thread, const char *url)
+{
+	html_content *htmlc = qjsky_html_content(thread);
+	struct qjsky_module *mod;
+	hlcache_child_context child;
+	nsurl *nsurl;
+	nserror err;
+
+	mod = qjsky_module_new(thread, url);
+	if (mod == NULL) {
+		return NULL;
+	}
+
+	if ((htmlc == NULL) ||
+	    (nsurl_create(url, &nsurl) != NSERROR_OK)) {
+		mod->status = JS_MODULE_FAILED;
+		return mod;
+	}
+
+	child.charset = htmlc->encoding;
+	child.quirks = htmlc->base.quirks;
+
+	NSLOG(qjsky, INFO, "fetching module %s", url);
+
+	err = hlcache_handle_retrieve(nsurl, 0, content_get_url(&htmlc->base),
+				      NULL, qjsky_module_fetch_cb, mod,
+				      &child, CONTENT_SCRIPT, &mod->handle);
+	nsurl_unref(nsurl);
+	if (err != NSERROR_OK) {
+		mod->handle = NULL;
+		mod->status = JS_MODULE_FAILED;
+	}
+
+	return mod;
+}
+
+
+/**
+ * Get the status of a module and every module it imports.
+ *
+ * Modules which have not been requested yet are fetched.
+ *
+ * \param thread The thread to load the modules in
+ * \param url Name of the module
+ * \return JS_MODULE_READY if every module has been compiled,
+ *         JS_MODULE_PENDING if some are being fetched or
+ *         JS_MODULE_FAILED if any failed
+ */
+static enum js_module_status
+qjsky_module_graph(jsthread *thread, const char *url)
+{
+	JSContext *jctx = thread->jctx;
+	enum js_module_status status = JS_MODULE_READY;
+	char **urls;
+	size_t count = 0;
+	size_t alloc = 16;
+	size_t next;
+
+	/* every module of the graph, in the order found */
+	urls = malloc(alloc * sizeof(*urls));
+	if (urls == NULL) {
+		return JS_MODULE_FAILED;
+	}
+	urls[count] = strdup(url);
+	if (urls[count] == NULL) {
+		free(urls);
+		return JS_MODULE_FAILED;
+	}
+	count++;
+
+	for (next = 0; (next < count) && (status != JS_MODULE_FAILED); next++) {
+		const char *u = urls[next];
+		struct qjsky_module *mod;
+		JSModuleDef *m;
+		int i;
+		int n;
+
+		mod = qjsky_module_find(thread, u);
+		if (mod == NULL) {
+			mod = qjsky_module_fetch(thread, u);
+			if (mod == NULL) {
+				status = JS_MODULE_FAILED;
+				break;
+			}
+		}
+		if (mod->status == JS_MODULE_FAILED) {
+			status = JS_MODULE_FAILED;
+			break;
+		}
+		if (mod->status == JS_MODULE_PENDING) {
+			status = JS_MODULE_PENDING;
+			continue;
+		}
+
+		m = JS_FindLoadedModule(jctx, u);
+		if (m == NULL) {
+			NSLOG(qjsky, INFO, "module %s has gone", u);
+			mod->status = JS_MODULE_FAILED;
+			status = JS_MODULE_FAILED;
+			break;
+		}
+
+		n = JS_GetModuleRequestCount(m);
+		for (i = 0; i < n; i++) {
+			JSAtom atom = JS_GetModuleRequest(jctx, m, i);
+			const char *spec = JS_AtomToCString(jctx, atom);
+			char *resolved = NULL;
+			size_t j;
+
+			JS_FreeAtom(jctx, atom);
+			if (spec != NULL) {
+				resolved = qjsky_module_normalize(jctx, u,
+								  spec, NULL);
+				JS_FreeCString(jctx, spec);
+			}
+			if (resolved == NULL) {
+				qjsky_dump_exception(jctx);
+				status = JS_MODULE_FAILED;
+				break;
+			}
+
+			for (j = 0; j < count; j++) {
+				if (strcmp(urls[j], resolved) == 0) {
+					break;
+				}
+			}
+			if (j < count) {
+				/* already in the graph */
+				js_free(jctx, resolved);
+				continue;
+			}
+
+			if (count == alloc) {
+				char **n_urls = realloc(urls,
+						alloc * 2 * sizeof(*urls));
+				if (n_urls == NULL) {
+					js_free(jctx, resolved);
+					status = JS_MODULE_FAILED;
+					break;
+				}
+				urls = n_urls;
+				alloc *= 2;
+			}
+			urls[count] = strdup(resolved);
+			js_free(jctx, resolved);
+			if (urls[count] == NULL) {
+				status = JS_MODULE_FAILED;
+				break;
+			}
+			count++;
+		}
+	}
+
+	for (next = 0; next < count; next++) {
+		free(urls[next]);
+	}
+	free(urls);
+
+	return status;
+}
+
+
+/**
+ * Free a module script or import(), removing it from its thread.
+ */
+static void qjsky_module_free(struct js_module *load)
+{
+	jsthread *thread = load->thread;
+
+	if (load->prev != NULL) {
+		load->prev->next = load->next;
+	} else {
+		thread->module_loads = load->next;
+	}
+	if (load->next != NULL) {
+		load->next->prev = load->prev;
+	}
+
+	JS_FreeValue(thread->jctx, load->resolving_funcs[0]);
+	JS_FreeValue(thread->jctx, load->resolving_funcs[1]);
+	free(load->url);
+	free(load);
+}
+
+
+/**
+ * Create a module script or import() of a module.
+ */
+static struct js_module *qjsky_module_new_load(jsthread *thread, const char *url)
+{
+	struct js_module *load;
+
+	load = calloc(1, sizeof(*load));
+	if (load == NULL) {
+		return NULL;
+	}
+	load->url = strdup(url);
+	if (load->url == NULL) {
+		free(load);
+		return NULL;
+	}
+	load->thread = thread;
+	load->resolving_funcs[0] = JS_UNDEFINED;
+	load->resolving_funcs[1] = JS_UNDEFINED;
+
+	load->next = thread->module_loads;
+	if (load->next != NULL) {
+		load->next->prev = load;
+	}
+	thread->module_loads = load;
+
+	return load;
+}
+
+
+/**
+ * Job which settles the promise of import() with the module.
+ *
+ * argv holds the promise resolve and reject functions and the module
+ * URL.  Every module the import needs has been compiled, so loading it
+ * evaluates it.
+ */
+static JSValue
+qjsky_module_import_job(JSContext *jctx, int argc, JSValueConst *argv)
+{
+	const char *url = JS_ToCString(jctx, argv[2]);
+	JSValue promise;
+	JSValue ret;
+
+	if (url == NULL) {
+		promise = JS_EXCEPTION;
+	} else {
+		promise = JS_LoadModule(jctx, url, url);
+		JS_FreeCString(jctx, url);
+	}
+
+	if (JS_IsException(promise)) {
+		JSValue err = JS_GetException(jctx);
+		ret = JS_Call(jctx, argv[1], JS_UNDEFINED, 1,
+			      (JSValueConst *)&err);
+		JS_FreeValue(jctx, err);
+	} else {
+		ret = JS_Call(jctx, argv[0], JS_UNDEFINED, 1,
+			      (JSValueConst *)&promise);
+		JS_FreeValue(jctx, promise);
+	}
+	JS_FreeValue(jctx, ret);
+
+	return JS_UNDEFINED;
+}
+
+
+/**
+ * Settle the promise of an import() whose modules have loaded or failed.
+ */
+static void
+qjsky_module_import_settle(struct js_module *load, enum js_module_status status)
+{
+	JSContext *jctx = load->thread->jctx;
+
+	if (status == JS_MODULE_READY) {
+		JSValue args[3];
+
+		args[0] = load->resolving_funcs[0];
+		args[1] = load->resolving_funcs[1];
+		args[2] = JS_NewString(jctx, load->url);
+		JS_EnqueueJob(jctx, qjsky_module_import_job, 3,
+			      (JSValueConst *)args);
+		JS_FreeValue(jctx, args[2]);
+	} else {
+		JSValue err;
+		JSValue ret;
+
+		err = JS_NewError(jctx);
+		JS_DefinePropertyValueStr(jctx, err, "name",
+					  JS_NewString(jctx, "TypeError"),
+					  JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+		JS_DefinePropertyValueStr(jctx, err, "message",
+				JS_NewString(jctx, "Failed to fetch dynamically "
+					     "imported module"),
+				JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE);
+		ret = JS_Call(jctx, load->resolving_funcs[1], JS_UNDEFINED,
+			      1, (JSValueConst *)&err);
+		JS_FreeValue(jctx, ret);
+		JS_FreeValue(jctx, err);
+	}
+}
+
+
+/**
+ * Complete module scripts and imports whose modules have been fetched.
+ */
+static void qjsky_module_check_loads(jsthread *thread)
+{
+	struct js_module *load;
+	bool again = true;
+
+	/* callbacks can change the list, so start again after each */
+	while (again) {
+		again = false;
+		for (load = thread->module_loads; load != NULL; load = load->next) {
+			enum js_module_status status;
+
+			if (load->waiting == false) {
+				continue;
+			}
+
+			status = qjsky_module_graph(thread, load->url);
+			if (status == JS_MODULE_PENDING) {
+				continue;
+			}
+
+			load->waiting = false;
+			if (load->cb == NULL) {
+				/* import() */
+				qjsky_enter_js(thread->heap, true);
+				qjsky_module_import_settle(load, status);
+				qjsky_module_free(load);
+				qjsky_leave_js(thread->heap);
+			} else {
+				load->cb(load->pw, load, status);
+				if (status != JS_MODULE_READY) {
+					qjsky_module_free(load);
+				}
+			}
+			again = true;
+			break;
+		}
+	}
+}
+
+
+/**
+ * Dynamic import hook for QuickJS: import() of a module.
+ *
+ * \return 0 when the promise will be settled, or -1 with an exception
+ *         pending to reject it now
+ */
+static int
+qjsky_module_dynamic_import(JSContext *jctx,
+			    JSValueConst basename,
+			    JSValueConst specifier,
+			    JSValueConst attributes,
+			    JSValueConst *resolving_funcs,
+			    void *opaque)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	const char *base = NULL;
+	const char *spec;
+	char *url;
+	struct js_module *load;
+	enum js_module_status status;
+
+	if (JS_IsObject(attributes)) {
+		JSValue type = JS_GetPropertyStr(jctx, attributes, "type");
+		bool typed = !JS_IsUndefined(type);
+
+		JS_FreeValue(jctx, type);
+		if (typed) {
+			JS_ThrowTypeError(jctx, "module type not supported");
+			return -1;
+		}
+	}
+
+	spec = JS_ToCString(jctx, specifier);
+	if (spec == NULL) {
+		return -1;
+	}
+	if (JS_IsString(basename)) {
+		base = JS_ToCString(jctx, basename);
+	}
+	url = qjsky_module_normalize(jctx, base, spec, NULL);
+	JS_FreeCString(jctx, base);
+	JS_FreeCString(jctx, spec);
+	if (url == NULL) {
+		return -1;
+	}
+
+	load = qjsky_module_new_load(thread, url);
+	js_free(jctx, url);
+	if (load == NULL) {
+		JS_ThrowOutOfMemory(jctx);
+		return -1;
+	}
+	load->resolving_funcs[0] = JS_DupValue(jctx, resolving_funcs[0]);
+	load->resolving_funcs[1] = JS_DupValue(jctx, resolving_funcs[1]);
+
+	status = qjsky_module_graph(thread, load->url);
+	if (status == JS_MODULE_PENDING) {
+		load->waiting = true;
+	} else {
+		qjsky_module_import_settle(load, status);
+		qjsky_module_free(load);
+	}
+
+	return 0;
+}
+
+
+/**
+ * Forget the modules of a thread, before its context is freed.
+ */
+static void qjsky_module_free_all(jsthread *thread)
+{
+	while (thread->module_loads != NULL) {
+		qjsky_module_free(thread->module_loads);
+	}
+
+	while (thread->modules != NULL) {
+		struct qjsky_module *mod = thread->modules;
+
+		thread->modules = mod->next;
+		if (mod->handle != NULL) {
+			hlcache_handle_abort(mod->handle);
+			hlcache_handle_release(mod->handle);
+		}
+		free(mod->url);
+		free(mod);
+	}
+}
+
+
+/* exported interface documented in js.h */
+bool js_supports_modules(void)
+{
+	return true;
+}
+
+
+/* exported interface documented in js.h */
+enum js_module_status
+js_module_load(jsthread *thread,
+	       const uint8_t *txt,
+	       size_t txtlen,
+	       const char *url,
+	       bool is_inline,
+	       js_module_cb *cb,
+	       void *pw,
+	       struct js_module **module_out)
+{
+	struct qjsky_module *mod;
+	struct js_module *load;
+	enum js_module_status status;
+	char *name = NULL;
+
+	*module_out = NULL;
+
+	if (thread->pending_destroy) {
+		return JS_MODULE_FAILED;
+	}
+
+	if (is_inline) {
+		/* each module in a document needs its own name, so the
+		 * fragment of the document's URL is replaced
+		 */
+		size_t len = strcspn(url, "#");
+
+		name = malloc(len + 32);
+		if (name == NULL) {
+			return JS_MODULE_FAILED;
+		}
+		snprintf(name, len + 32, "%.*s#netsurf-module-%u",
+			 (int)len, url, ++thread->inline_modules);
+	} else {
+		name = strdup(url);
+		if (name == NULL) {
+			return JS_MODULE_FAILED;
+		}
+	}
+
+	qjsky_enter_thread(thread);
+
+	mod = qjsky_module_find(thread, name);
+	if (mod == NULL) {
+		/* not imported by another module yet */
+		mod = qjsky_module_new(thread, name);
+		if (mod != NULL) {
+			mod->status = qjsky_module_compile(thread, name,
+							   txt, txtlen, url);
+		}
+	}
+
+	load = (mod != NULL) ? qjsky_module_new_load(thread, name) : NULL;
+	free(name);
+	if (load == NULL) {
+		qjsky_leave_thread(thread);
+		return JS_MODULE_FAILED;
+	}
+	load->cb = cb;
+	load->pw = pw;
+
+	status = qjsky_module_graph(thread, load->url);
+	switch (status) {
+	case JS_MODULE_READY:
+		*module_out = load;
+		break;
+	case JS_MODULE_PENDING:
+		load->waiting = true;
+		*module_out = load;
+		break;
+	default:
+		qjsky_module_free(load);
+		break;
+	}
+
+	qjsky_leave_thread(thread);
+
+	return status;
+}
+
+
+/* exported interface documented in js.h */
+bool js_module_exec(jsthread *thread, struct js_module *module)
+{
+	JSContext *jctx = thread->jctx;
+	JSModuleDef *m;
+	bool ret = false;
+
+	assert(module->waiting == false);
+
+	if (thread->pending_destroy) {
+		qjsky_module_free(module);
+		return false;
+	}
+
+	qjsky_enter_thread(thread);
+	qjsky_enter_js(thread->heap, true);
+
+	m = JS_FindLoadedModule(jctx, module->url);
+	if (m != NULL) {
+		JSValue val = JS_DupValue(jctx, JS_MKPTR(JS_TAG_MODULE, m));
+
+		if (JS_ResolveModule(jctx, val) < 0) {
+			qjsky_dump_exception(jctx);
+			JS_FreeValue(jctx, val);
+		} else {
+			/* evaluation returns a promise, which is rejected
+			 * if the module throws and is then reported as
+			 * an unhandled rejection
+			 */
+			JSValue res = JS_EvalFunction(jctx, val);
+
+			if (JS_IsException(res)) {
+				qjsky_dump_exception(jctx);
+			} else {
+				ret = true;
+			}
+			JS_FreeValue(jctx, res);
+		}
+	}
+
+	qjsky_module_free(module);
+
+	qjsky_leave_js(thread->heap);
+	qjsky_leave_thread(thread);
+
+	return ret;
+}
+
+
 /* exported interface documented in js.h */
 void js_initialise(void)
 {
@@ -1740,6 +2600,9 @@ nserror js_newheap(int timeout, jsheap **heap)
 	JS_SetRuntimeOpaque(ret->rt, ret);
 	JS_SetInterruptHandler(ret->rt, qjsky_check_timeout, ret);
 	JS_SetHostPromiseRejectionTracker(ret->rt, qjsky_promise_rejection, ret);
+	JS_SetModuleLoaderFunc(ret->rt, qjsky_module_normalize,
+			       qjsky_module_loader, ret);
+	JS_SetDynamicImportHook(ret->rt, qjsky_module_dynamic_import, ret);
 
 	/* register the binding classes, class ids are allocated
 	 * sequentially so the range check in qjsky_class_index works
@@ -2014,6 +2877,7 @@ static void qjsky_destroythread(jsthread *thread)
 		thread->window_priv = NULL;
 	}
 
+	qjsky_module_free_all(thread);
 	qjsduk_destroy(thread->ctx);
 	qjsky_flush_rejections(heap, thread->jctx);
 	JS_FreeValue(thread->jctx, thread->global);

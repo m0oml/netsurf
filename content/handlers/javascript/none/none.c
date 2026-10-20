@@ -66,6 +66,21 @@ bool js_exec(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *na
 	return true;
 }
 
+bool js_supports_modules(void)
+{
+	return false;
+}
+
+enum js_module_status js_module_load(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *url, bool is_inline, js_module_cb *cb, void *pw, struct js_module **module_out)
+{
+	return JS_MODULE_FAILED;
+}
+
+bool js_module_exec(jsthread *thread, struct js_module *module)
+{
+	return false;
+}
+
 bool js_fire_event(jsthread *thread, const char *type, struct dom_document *doc, struct dom_node *target)
 {
 	return true;

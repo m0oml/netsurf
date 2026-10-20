@@ -35,6 +35,7 @@
 #include "desktop/frame_types.h"
 
 struct fetch_multipart_data;
+struct js_module;
 struct box;
 struct rect;
 struct browser_window;
@@ -71,11 +72,16 @@ struct html_script {
 	enum html_script_type { HTML_SCRIPT_INLINE,
 				HTML_SCRIPT_SYNC,
 				HTML_SCRIPT_DEFER,
-				HTML_SCRIPT_ASYNC } type;
+				HTML_SCRIPT_ASYNC,
+				HTML_SCRIPT_MODULE } type;
 	union {
 		struct hlcache_handle *handle;
 		struct dom_string *string;
-	} data;	/**< Script data */
+	} data;	/**< Script data, the handle is NULL for an inline module */
+	/** Module script, once fetched, until it is executed */
+	struct js_module *module;
+	/** Whether the modules a module script imports are being fetched */
+	bool module_pending;
 	struct dom_string *mimetype;
 	struct dom_string *encoding;
 	bool already_started;
