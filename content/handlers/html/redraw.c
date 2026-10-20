@@ -592,6 +592,97 @@ static bool html_redraw_file(int x, int y, int width, int height,
  * \return true if successful, false otherwise
  */
 
+/**
+ * Convert a background-size dimension to pixels.
+ */
+static int html_background_size_px(const css_computed_style *style,
+		const css_unit_ctx *unit_len_ctx,
+		css_fixed length, css_unit unit, int area)
+{
+	if (unit == CSS_UNIT_PCT) {
+		return FIXTOINT(FMUL(INTTOFIX(area),
+				FDIV(length, INTTOFIX(100))));
+	}
+
+	return FIXTOINT(css_unit_len2device_px(style, unit_len_ctx,
+			length, unit));
+}
+
+
+/* exported interface documented in html/private.h */
+void html_background_image_size(const css_computed_style *style,
+		const css_unit_ctx *unit_len_ctx,
+		int area_width, int area_height,
+		struct hlcache_handle *image,
+		int *width, int *height)
+{
+	int image_width = content_get_width(image);
+	int image_height = content_get_height(image);
+	css_fixed w_len = 0, h_len = 0;
+	css_unit w_unit = CSS_UNIT_PX, h_unit = CSS_UNIT_PX;
+	uint8_t type;
+	float sx, sy, s;
+
+	*width = image_width;
+	*height = image_height;
+
+	if (image_width <= 0 || image_height <= 0) {
+		/* Without an intrinsic size the image can't be scaled */
+		return;
+	}
+
+	type = css_computed_background_size(style, &w_len, &w_unit,
+			&h_len, &h_unit);
+	switch (type) {
+	case CSS_BACKGROUND_SIZE_COVER:
+	case CSS_BACKGROUND_SIZE_CONTAIN:
+		/* Scale keeping the aspect ratio so the image covers the
+		 * area, or fits inside it */
+		sx = (float) area_width / image_width;
+		sy = (float) area_height / image_height;
+		if (type == CSS_BACKGROUND_SIZE_COVER) {
+			s = (sx > sy) ? sx : sy;
+		} else {
+			s = (sx < sy) ? sx : sy;
+		}
+		*width = (int) (image_width * s + 0.5f);
+		*height = (int) (image_height * s + 0.5f);
+		break;
+
+	case CSS_BACKGROUND_SIZE_WIDTH:
+		*width = html_background_size_px(style, unit_len_ctx,
+				w_len, w_unit, area_width);
+		*height = (int) ((float) *width * image_height /
+				image_width + 0.5f);
+		break;
+
+	case CSS_BACKGROUND_SIZE_HEIGHT:
+		*height = html_background_size_px(style, unit_len_ctx,
+				h_len, h_unit, area_height);
+		*width = (int) ((float) *height * image_width /
+				image_height + 0.5f);
+		break;
+
+	case CSS_BACKGROUND_SIZE_SET:
+		*width = html_background_size_px(style, unit_len_ctx,
+				w_len, w_unit, area_width);
+		*height = html_background_size_px(style, unit_len_ctx,
+				h_len, h_unit, area_height);
+		break;
+
+	default:
+		/* auto: the image's own size */
+		break;
+	}
+
+	/* A size which rounds to nothing still shows something */
+	if (*width < 1)
+		*width = 1;
+	if (*height < 1)
+		*height = 1;
+}
+
+
 static bool html_redraw_background(int x, int y, struct box *box, float scale,
 		const struct rect *clip, colour *background_colour,
 		struct box *background,
@@ -606,6 +697,7 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 	struct box *clip_box = box;
 	int ox = x, oy = y;
 	int width, height;
+	int image_width = 0, image_height = 0;
 	css_fixed hpos = 0, vpos = 0;
 	css_unit hunit = CSS_UNIT_PX, vunit = CSS_UNIT_PX;
 	struct box *parent;
@@ -664,12 +756,16 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 			break;
 		}
 
+		/* handle background-size */
+		html_background_image_size(background->style, unit_len_ctx,
+				width, height, background->background,
+				&image_width, &image_height);
+
 		/* handle background-position */
 		css_computed_background_position(background->style,
 				&hpos, &hunit, &vpos, &vunit);
 		if (hunit == CSS_UNIT_PCT) {
-			x += (width -
-				content_get_width(background->background)) *
+			x += (width - image_width) *
 				scale * FIXTOFLT(hpos) / 100.;
 		} else {
 			x += (int) (FIXTOFLT(css_unit_len2device_px(
@@ -678,8 +774,7 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 		}
 
 		if (vunit == CSS_UNIT_PCT) {
-			y += (height -
-				content_get_height(background->background)) *
+			y += (height - image_height) *
 				scale * FIXTOFLT(vpos) / 100.;
 		} else {
 			y += (int) (FIXTOFLT(css_unit_len2device_px(
@@ -756,8 +851,8 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 		}
 		/* and plot the image */
 		if (plot_content) {
-			width = content_get_width(background->background);
-			height = content_get_height(background->background);
+			width = image_width;
+			height = image_height;
 
 			/* ensure clip area only as large as required */
 			if (!repeat_x) {
@@ -832,6 +927,7 @@ static bool html_redraw_inline_background(int x, int y, struct box *box,
 	bool repeat_y = false;
 	bool plot_colour = true;
 	bool plot_content;
+	int image_width = 0, image_height = 0;
 	css_fixed hpos = 0, vpos = 0;
 	css_unit hunit = CSS_UNIT_PX, vunit = CSS_UNIT_PX;
 	css_color bgcol;
@@ -872,13 +968,17 @@ static bool html_redraw_inline_background(int x, int y, struct box *box,
 			break;
 		}
 
+		/* handle background-size, the area being unscaled */
+		html_background_image_size(box->style, unit_len_ctx,
+				(b.x1 - b.x0) / scale, (b.y1 - b.y0) / scale,
+				box->background, &image_width, &image_height);
+
 		/* handle background-position */
 		css_computed_background_position(box->style,
 				&hpos, &hunit, &vpos, &vunit);
 		if (hunit == CSS_UNIT_PCT) {
-			x += (b.x1 - b.x0 -
-					content_get_width(box->background) *
-					scale) * FIXTOFLT(hpos) / 100.;
+			x += (b.x1 - b.x0 - image_width * scale) *
+					FIXTOFLT(hpos) / 100.;
 
 			if (!repeat_x && ((hpos < 2 && !first) ||
 					(hpos > 98 && !last))){
@@ -891,9 +991,8 @@ static bool html_redraw_inline_background(int x, int y, struct box *box,
 		}
 
 		if (vunit == CSS_UNIT_PCT) {
-			y += (b.y1 - b.y0 -
-					content_get_height(box->background) *
-					scale) * FIXTOFLT(vpos) / 100.;
+			y += (b.y1 - b.y0 - image_height * scale) *
+					FIXTOFLT(vpos) / 100.;
 		} else {
 			y += (int) (FIXTOFLT(css_unit_len2device_px(
 					box->style, unit_len_ctx,
@@ -917,8 +1016,8 @@ static bool html_redraw_inline_background(int x, int y, struct box *box,
 	}
 	/* and plot the image */
 	if (plot_content) {
-		int width = content_get_width(box->background);
-		int height = content_get_height(box->background);
+		int width = image_width;
+		int height = image_height;
 
 		if (!repeat_x) {
 			if (r.x0 < x)

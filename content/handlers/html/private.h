@@ -35,6 +35,7 @@ struct gui_layout_table;
 struct scrollbar_msg_data;
 struct content_redraw_data;
 struct selection;
+struct hlcache_handle;
 
 typedef enum {
 	HTML_DRAG_NONE,			/** No drag */
@@ -327,6 +328,19 @@ void html_layout_viewport(html_content *htmlc, int *width, int *height, int *scr
  * \return The value, which the caller must free, or NULL if unknown
  */
 char *html_layout_computed_style(html_content *htmlc, struct dom_node *node, const char *property);
+
+/**
+ * Get the size to draw a background image at, from background-size.
+ *
+ * \param style        Style giving the background-size
+ * \param unit_len_ctx Length conversion context
+ * \param area_width   Width of the background positioning area
+ * \param area_height  Height of the background positioning area
+ * \param image        The background image
+ * \param width        Updated to the width to draw the image at
+ * \param height       Updated to the height to draw the image at
+ */
+void html_background_image_size(const css_computed_style *style, const css_unit_ctx *unit_len_ctx, int area_width, int area_height, struct hlcache_handle *image, int *width, int *height);
 
 
 /**

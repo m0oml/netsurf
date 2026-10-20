@@ -259,11 +259,15 @@ html_object_callback(hlcache_handle *object,
 						box->padding[BOTTOM];
 				int t, h, l, w;
 
-				/* Need to know background-position */
+				/* Need to know background-size and
+				 * background-position */
+				html_background_image_size(box->style,
+						&c->unit_len_ctx,
+						width, height,
+						box->background, &w, &h);
 				css_computed_background_position(box->style,
 						&hpos, &hunit, &vpos, &vunit);
 
-				w = content_get_width(box->background);
 				if (hunit == CSS_UNIT_PCT) {
 					l = (width - w) * hpos / INTTOFIX(100);
 				} else {
@@ -273,7 +277,6 @@ html_object_callback(hlcache_handle *object,
 							hpos, hunit));
 				}
 
-				h = content_get_height(box->background);
 				if (vunit == CSS_UNIT_PCT) {
 					t = (height - h) * vpos / INTTOFIX(100);
 				} else {
@@ -283,35 +286,45 @@ html_object_callback(hlcache_handle *object,
 							vpos, vunit));
 				}
 
-				/* Redraw area depends on background-repeat */
-				switch (css_computed_background_repeat(
-						box->style)) {
-				case CSS_BACKGROUND_REPEAT_REPEAT:
+				/* Redraw area depends on background-repeat,
+				 * unless the image is scaled when the area
+				 * changed is not known */
+				if (w != content_get_width(box->background) ||
+				    h != content_get_height(box->background)) {
 					data.redraw.x = 0;
 					data.redraw.y = 0;
 					data.redraw.width = box->width;
 					data.redraw.height = box->height;
-					break;
+				} else {
+					switch (css_computed_background_repeat(
+							box->style)) {
+					case CSS_BACKGROUND_REPEAT_REPEAT:
+						data.redraw.x = 0;
+						data.redraw.y = 0;
+						data.redraw.width = box->width;
+						data.redraw.height = box->height;
+						break;
 
-				case CSS_BACKGROUND_REPEAT_REPEAT_X:
-					data.redraw.x = 0;
-					data.redraw.y += t;
-					data.redraw.width = box->width;
-					break;
+					case CSS_BACKGROUND_REPEAT_REPEAT_X:
+						data.redraw.x = 0;
+						data.redraw.y += t;
+						data.redraw.width = box->width;
+						break;
 
-				case CSS_BACKGROUND_REPEAT_REPEAT_Y:
-					data.redraw.x += l;
-					data.redraw.y = 0;
-					data.redraw.height = box->height;
-					break;
+					case CSS_BACKGROUND_REPEAT_REPEAT_Y:
+						data.redraw.x += l;
+						data.redraw.y = 0;
+						data.redraw.height = box->height;
+						break;
 
-				case CSS_BACKGROUND_REPEAT_NO_REPEAT:
-					data.redraw.x += l;
-					data.redraw.y += t;
-					break;
+					case CSS_BACKGROUND_REPEAT_NO_REPEAT:
+						data.redraw.x += l;
+						data.redraw.y += t;
+						break;
 
-				default:
-					break;
+					default:
+						break;
+					}
 				}
 
 				/* Add offset to box */
