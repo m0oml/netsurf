@@ -169,6 +169,8 @@ svg_redraw_internal(svg_content *svg,
 		    colour background_colour)
 {
 	float transform[6];
+	float stroke_scale;
+	float stroke_width;
 	struct svgtiny_diagram *diagram = svg->diagram;
 	int px, py;
 	unsigned int i;
@@ -185,6 +187,8 @@ svg_redraw_internal(svg_content *svg,
 	transform[4] = x;
 	transform[5] = y;
 
+	stroke_scale = (transform[0] + transform[3]) / 2;
+
 #define BGR(c) (((svgtiny_RED((c))) |					\
 		 (svgtiny_GREEN((c)) << 8) |				\
 		 (svgtiny_BLUE((c)) << 16)))
@@ -199,8 +203,17 @@ svg_redraw_internal(svg_content *svg,
 				pstyle.stroke_type = PLOT_OP_TYPE_SOLID;
 				pstyle.stroke_colour = BGR(diagram->shape[i].stroke);
 			}
-			pstyle.stroke_width = plot_style_int_to_fixed(
-					diagram->shape[i].stroke_width);
+			/* the path is scaled by the transform, so the
+			 * stroke must be too, though not to nothing
+			 */
+			stroke_width = diagram->shape[i].stroke_width *
+					stroke_scale;
+			if ((stroke_width < 1) &&
+			    (diagram->shape[i].stroke_width > 0)) {
+				stroke_width = 1;
+			}
+			pstyle.stroke_width = (plot_style_fixed)
+					(stroke_width * PLOT_STYLE_SCALE);
 
 			/* fill style */
 			if (diagram->shape[i].fill == svgtiny_TRANSPARENT) {
