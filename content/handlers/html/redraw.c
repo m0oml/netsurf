@@ -709,6 +709,43 @@ static bool html_redraw_ring(const struct rect *outer,
 
 
 /**
+ * Plot a shape, less a hole in it, where the corners may be rounded.
+ *
+ * \param outer        the shape
+ * \param outer_radii  radii of its corners, or NULL if square
+ * \param hole         the hole
+ * \param hole_radii   radii of its corners, or NULL if square
+ * \param clip         clip rectangle
+ * \param style        style to plot with
+ * \param ctx          current redraw context
+ * \return true if successful, false otherwise
+ */
+static bool html_redraw_shape_ring(const struct rect *outer,
+		const struct html_radii *outer_radii,
+		const struct rect *hole, const struct html_radii *hole_radii,
+		const struct rect *clip, const plot_style_t *style,
+		const struct redraw_context *ctx)
+{
+	if ((outer_radii == NULL || html_radii_any(outer_radii) == false) &&
+	    (hole_radii == NULL || html_radii_any(hole_radii) == false)) {
+		return html_redraw_ring(outer, hole, clip, style, ctx);
+	}
+
+	if (outer_radii == NULL || hole_radii == NULL) {
+		static const struct html_radii square;
+
+		if (outer_radii == NULL)
+			outer_radii = &square;
+		if (hole_radii == NULL)
+			hole_radii = &square;
+	}
+
+	return html_redraw_rounded_ring(ctx, outer, outer_radii, hole,
+			hole_radii, style->fill_colour, clip);
+}
+
+
+/**
  * Plot the box shadows of a box.
  *
  * Outer shadows are drawn outside the border box, and inset shadows
@@ -718,6 +755,7 @@ static bool html_redraw_ring(const struct rect *outer,
  * \param style         style of the box
  * \param unit_len_ctx  length conversion context
  * \param area          border box for outer shadows, padding box for inset
+ * \param radii         radii of the corners of area, or NULL if square
  * \param scale         scale for redraw
  * \param inset         draw the inset shadows, rather than the outer ones
  * \param under         colour the shadows are drawn over
@@ -727,6 +765,7 @@ static bool html_redraw_ring(const struct rect *outer,
  */
 static bool html_redraw_box_shadows(const css_computed_style *style,
 		const css_unit_ctx *unit_len_ctx, const struct rect *area,
+		const struct html_radii *radii,
 		float scale, bool inset, colour under,
 		const struct rect *clip, const struct redraw_context *ctx)
 {
@@ -736,6 +775,7 @@ static bool html_redraw_box_shadows(const css_computed_style *style,
 		.fill_type = PLOT_OP_TYPE_SOLID,
 	};
 	int count;
+	bool rounded = (radii != NULL) && html_radii_any(radii);
 
 	if (css_computed_box_shadow(style, &shadows) != CSS_BOX_SHADOW_SET ||
 			shadows == NULL)
@@ -787,6 +827,7 @@ static bool html_redraw_box_shadows(const css_computed_style *style,
 			int e = (steps == 1) ? 0 :
 					blur / 2 - (blur * k) / (steps - 1);
 			struct rect band;
+			struct html_radii band_radii;
 
 			if (inset)
 				e = -e;
@@ -795,18 +836,33 @@ static bool html_redraw_box_shadows(const css_computed_style *style,
 			band.x1 = shape.x1 + e;
 			band.y1 = shape.y1 + e;
 
+			/* the corners stay concentric with the box's */
+			if (rounded) {
+				band_radii = *radii;
+				/* how far each side is in from the box's,
+				 * leaving out the offset of the shadow */
+				html_radii_adjust(&band_radii,
+						(band.x0 - ox) - area->x0,
+						(band.y0 - oy) - area->y0,
+						area->x1 - (band.x1 - ox),
+						area->y1 - (band.y1 - oy));
+			}
+
 			pstyle.fill_colour = html_redraw_blend(under, colour,
 					(256 * (k + 1)) / steps);
 
 			if (inset) {
 				/* Shadow is the area less the band */
-				if (!html_redraw_ring(area, &band, clip,
-						&pstyle, ctx))
+				if (!html_redraw_shape_ring(area, radii,
+						&band, rounded ? &band_radii : NULL,
+						clip, &pstyle, ctx))
 					return false;
 			} else {
 				/* Shadow is the band less the box */
-				if (!html_redraw_ring(&band, area, clip,
-						&pstyle, ctx))
+				if (!html_redraw_shape_ring(&band,
+						rounded ? &band_radii : NULL,
+						area, radii,
+						clip, &pstyle, ctx))
 					return false;
 			}
 		}
@@ -904,6 +960,41 @@ void html_background_image_size(const css_computed_style *style,
 		*width = 1;
 	if (*height < 1)
 		*height = 1;
+}
+
+
+/**
+ * Get the border box of a box as drawn, and the radii of its corners.
+ *
+ * \param box           the box
+ * \param x             left of the padding box, as drawn
+ * \param y             top of the padding box, as drawn
+ * \param scale         scale for redraw
+ * \param unit_len_ctx  length conversion context
+ * \param border_box    updated with the border box
+ * \param radii         updated with the radii
+ * \return true if any corner is rounded
+ */
+static bool html_redraw_box_radii(const struct box *box, int x, int y,
+		float scale, const css_unit_ctx *unit_len_ctx,
+		struct rect *border_box, struct html_radii *radii)
+{
+	if (box->style == NULL) {
+		return false;
+	}
+
+	border_box->x0 = x - (int) (box->border[LEFT].width * scale);
+	border_box->y0 = y - (int) (box->border[TOP].width * scale);
+	border_box->x1 = x + (int) ((box->padding[LEFT] + box->width +
+			box->padding[RIGHT]) * scale) +
+			(int) (box->border[RIGHT].width * scale);
+	border_box->y1 = y + (int) ((box->padding[TOP] + box->height +
+			box->padding[BOTTOM]) * scale) +
+			(int) (box->border[BOTTOM].width * scale);
+
+	return html_radii_get(box->style, unit_len_ctx,
+			border_box->x1 - border_box->x0,
+			border_box->y1 - border_box->y0, scale, radii);
 }
 
 
@@ -1067,9 +1158,27 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 			*background_colour = nscss_color_to_ns(bgcol);
 			pstyle_fill_bg.fill_colour = *background_colour;
 			if (plot_colour) {
-				res = ctx->plot->rectangle(ctx, &pstyle_fill_bg, &r);
-				if (res != NSERROR_OK) {
-					return false;
+				struct rect border_box;
+				struct html_radii radii;
+
+				if (background == box && box->parent != NULL &&
+						clip_to_children == false &&
+						html_redraw_box_radii(box, ox, oy,
+							scale, unit_len_ctx,
+							&border_box, &radii)) {
+					/* rounded corners, where the colour
+					 * shows only inside them */
+					if (!html_redraw_rounded_fill(ctx,
+							&border_box, &radii,
+							pstyle_fill_bg.fill_colour,
+							&r))
+						return false;
+				} else {
+					res = ctx->plot->rectangle(ctx,
+							&pstyle_fill_bg, &r);
+					if (res != NSERROR_OK) {
+						return false;
+					}
 				}
 			}
 		}
@@ -1551,6 +1660,62 @@ static bool html_redraw_box_children(const html_content *html, struct box *box,
  * x, y, clip_[xy][01] are in target coordinates.
  */
 
+/**
+ * Plot the border of a box with rounded corners, if all its sides are
+ * the same width, colour and solid.
+ *
+ * Borders which differ can't follow the corners and are drawn square.
+ *
+ * \param box       the box
+ * \param x         left of the padding box, as drawn
+ * \param y         top of the padding box, as drawn
+ * \param p_width   width of the padding box, as drawn
+ * \param p_height  height of the padding box, as drawn
+ * \param radii     radii of the corners of the border box
+ * \param clip      clip rectangle
+ * \param scale     scale for redraw
+ * \param ctx       current redraw context
+ * \return true if the border was plotted, false if it was not
+ */
+static bool html_redraw_rounded_border(const struct box *box, int x, int y,
+		int p_width, int p_height, const struct html_radii *radii,
+		const struct rect *clip, float scale,
+		const struct redraw_context *ctx)
+{
+	struct rect outer, hole;
+	struct html_radii inner = *radii;
+	int left = box->border[LEFT].width * scale;
+	int top = box->border[TOP].width * scale;
+	int right = box->border[RIGHT].width * scale;
+	int bottom = box->border[BOTTOM].width * scale;
+	unsigned int side;
+
+	for (side = 0; side < 4; side++) {
+		if (box->border[side].width == 0 ||
+		    box->border[side].style != CSS_BORDER_STYLE_SOLID ||
+		    nscss_color_is_transparent(box->border[side].c) ||
+		    box->border[side].width != box->border[0].width ||
+		    box->border[side].c != box->border[0].c) {
+			return false;
+		}
+	}
+
+	outer.x0 = x - left;
+	outer.y0 = y - top;
+	outer.x1 = x + p_width + right;
+	outer.y1 = y + p_height + bottom;
+	hole.x0 = x;
+	hole.y0 = y;
+	hole.x1 = x + p_width;
+	hole.y1 = y + p_height;
+
+	html_radii_adjust(&inner, left, top, right, bottom);
+
+	return html_redraw_rounded_ring(ctx, &outer, radii, &hole, &inner,
+			nscss_color_to_ns(box->border[0].c), clip);
+}
+
+
 bool html_redraw_box(const html_content *html, struct box *box,
 		int x_parent, int y_parent,
 		const struct rect *clip, const float scale,
@@ -1566,6 +1731,8 @@ bool html_redraw_box(const html_content *html, struct box *box,
 	struct rect rect;
 	int x_scrolled, y_scrolled;
 	struct box *bg_box = NULL;
+	struct html_radii radii = { { 0 }, { 0 } };
+	bool rounded = false;
 	css_computed_clip_rect css_rect;
 	enum css_overflow_e overflow_x = CSS_OVERFLOW_VISIBLE;
 	enum css_overflow_e overflow_y = CSS_OVERFLOW_VISIBLE;
@@ -1725,6 +1892,19 @@ bool html_redraw_box(const html_content *html, struct box *box,
 		return false;
 	}
 
+	/* rounded corners, of boxes which draw a background and borders */
+	if (box->style != NULL &&
+	    box->type != BOX_TEXT &&
+	    box->type != BOX_INLINE_END &&
+	    box->parent != NULL &&
+	    (box->type != BOX_INLINE || box->object ||
+	     box->flags & IFRAME || box->flags & REPLACE_DIM)) {
+		struct rect corners;
+
+		rounded = html_redraw_box_radii(box, x, y, scale,
+				&html->unit_len_ctx, &corners, &radii);
+	}
+
 	/* outer box shadows, which are outside the box so are drawn
 	 * before clipping to it */
 	if (html_redraw_box_has_shadow(box)) {
@@ -1738,7 +1918,8 @@ bool html_redraw_box(const html_content *html, struct box *box,
 		if (ctx->plot->clip(ctx, clip) != NSERROR_OK)
 			return false;
 		if (!html_redraw_box_shadows(box->style, &html->unit_len_ctx,
-				&border_box, scale, false,
+				&border_box, rounded ? &radii : NULL,
+				scale, false,
 				current_background_color, clip, ctx))
 			return false;
 	}
@@ -1873,8 +2054,16 @@ bool html_redraw_box(const html_content *html, struct box *box,
 			.y1 = y + padding_height,
 		};
 
+		struct html_radii inner = radii;
+
+		/* the corners of the padding box are inside the border's */
+		if (rounded)
+			html_radii_adjust(&inner, border_left, border_top,
+					border_right, border_bottom);
+
 		if (!html_redraw_box_shadows(box->style, &html->unit_len_ctx,
-				&padding_box, scale, true,
+				&padding_box, rounded ? &inner : NULL,
+				scale, true,
 				current_background_color, &r, ctx))
 			return false;
 	}
@@ -1890,7 +2079,11 @@ bool html_redraw_box(const html_content *html, struct box *box,
 	       box->gadget->type == GADGET_TEXTBOX ||
 	       box->gadget->type == GADGET_PASSWORD))) &&
 	    (border_top || border_right || border_bottom || border_left)) {
-		if (!html_redraw_borders(box, x_parent, y_parent,
+		if (rounded && html_redraw_rounded_border(box, x, y,
+				padding_width, padding_height, &radii,
+				&r, scale, ctx)) {
+			/* drawn as a ring following the corners */
+		} else if (!html_redraw_borders(box, x_parent, y_parent,
 				padding_width, padding_height, &r,
 				scale, ctx))
 			return false;

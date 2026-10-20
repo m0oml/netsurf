@@ -22,6 +22,7 @@ S_HTML := box_construct.c	\
 	rebuild.c		\
 	redraw.c		\
 	redraw_border.c		\
+	redraw_radius.c		\
 	script.c		\
 	table.c			\
 	textselection.c

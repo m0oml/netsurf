@@ -455,6 +455,89 @@ bool html_redraw(struct content *c, struct content_redraw_data *data,
 		const struct rect *clip, const struct redraw_context *ctx);
 
 
+/* in html/redraw_radius.c */
+
+/** The corners of a box, in the order of the radii */
+enum { HTML_TL, HTML_TR, HTML_BR, HTML_BL };
+
+/**
+ * The radii of the corners of a box, in pixels as drawn.
+ */
+struct html_radii {
+	float rx[4]; /**< horizontal radius of each corner */
+	float ry[4]; /**< vertical radius of each corner */
+};
+
+/**
+ * Get the radii of the corners of a box.
+ *
+ * Radii which are too big for the box are scaled down together until
+ * they fit, and corners with no radius, or one that is zero in either
+ * direction, are square.
+ *
+ * \param style         style of the box
+ * \param unit_len_ctx  length conversion context
+ * \param width         width of the border box as drawn
+ * \param height        height of the border box as drawn
+ * \param scale         scale for redraw
+ * \param radii         updated with the radii
+ * \return true if any corner is rounded
+ */
+bool html_radii_get(const css_computed_style *style,
+		const css_unit_ctx *unit_len_ctx,
+		int width, int height, float scale,
+		struct html_radii *radii);
+
+/**
+ * Move the sides of a shape in, changing the radii of its corners so
+ * they stay concentric.
+ *
+ * \param radii   the radii to change
+ * \param left    distance the left side moves in, negative for out
+ * \param top     distance the top side moves in
+ * \param right   distance the right side moves in
+ * \param bottom  distance the bottom side moves in
+ */
+void html_radii_adjust(struct html_radii *radii, float left, float top,
+		float right, float bottom);
+
+/**
+ * Check if any corner is rounded.
+ */
+bool html_radii_any(const struct html_radii *radii);
+
+/**
+ * Fill a rounded rectangle.
+ *
+ * \param ctx    current redraw context
+ * \param r      the rectangle
+ * \param radii  the radii of its corners
+ * \param fill   colour to fill with
+ * \param clip   clip rectangle
+ * \return true if successful, false otherwise
+ */
+bool html_redraw_rounded_fill(const struct redraw_context *ctx,
+		const struct rect *r, const struct html_radii *radii,
+		colour fill, const struct rect *clip);
+
+/**
+ * Fill a rounded rectangle, less a rounded hole in it.
+ *
+ * \param ctx          current redraw context
+ * \param outer        the rectangle
+ * \param outer_radii  the radii of its corners
+ * \param hole         the hole, which may be empty
+ * \param hole_radii   the radii of its corners
+ * \param fill         colour to fill with
+ * \param clip         clip rectangle
+ * \return true if successful, false otherwise
+ */
+bool html_redraw_rounded_ring(const struct redraw_context *ctx,
+		const struct rect *outer, const struct html_radii *outer_radii,
+		const struct rect *hole, const struct html_radii *hole_radii,
+		colour fill, const struct rect *clip);
+
+
 /* in html/redraw_border.c */
 bool html_redraw_borders(struct box *box, int x_parent, int y_parent,
 		int p_width, int p_height, const struct rect *clip, float scale,
