@@ -3366,8 +3366,9 @@ layout_line(struct box *first,
 				used_height = d->height;
 			}
 		} else if ((d->type == BOX_INLINE) ||
-				d->type == BOX_INLINE_BLOCK) {
-			/* replaced inlines and inline-blocks */
+				d->type == BOX_INLINE_BLOCK ||
+				d->type == BOX_INLINE_FLEX) {
+			/* replaced inlines, inline-blocks and inline-flexes */
 			d->x += x0;
 			d->y = *y + d->border[TOP].width + d->margin[TOP];
 			h = d->margin[TOP] + d->border[TOP].width +
