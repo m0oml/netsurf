@@ -1071,13 +1071,16 @@
   const supportedProperties = new Set((
     "align-content align-items align-self azimuth background " +
     "background-attachment background-color background-image " +
-    "background-position background-repeat border border-bottom " +
-    "border-bottom-color border-bottom-style border-bottom-width " +
+    "background-position background-repeat background-size border " +
+    "border-bottom border-bottom-color border-bottom-left-radius " +
+    "border-bottom-right-radius border-bottom-style border-bottom-width " +
     "border-collapse border-color border-left border-left-color " +
     "border-left-style border-left-width border-right border-right-color " +
     "border-right-style border-right-width border-spacing border-style " +
-    "border-top border-top-color border-top-style border-top-width " +
-    "border-width bottom box-sizing break-after break-before break-inside " +
+    "border-top border-top-color border-top-left-radius " +
+    "border-top-right-radius border-top-style border-top-width " +
+    "border-width border-radius bottom box-shadow box-sizing break-after " +
+    "break-before break-inside " +
     "caption-side clear clip color columns column-count column-fill " +
     "column-gap column-rule column-rule-color column-rule-style " +
     "column-rule-width column-span column-width content counter-increment " +

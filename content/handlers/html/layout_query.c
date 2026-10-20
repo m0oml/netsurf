@@ -380,6 +380,95 @@ html_layout_style_value(const css_computed_style *style,
 
 
 /**
+ * Format a radius of a corner, in px or %.
+ */
+static void
+html_layout_radius_text(char *buf, size_t len, css_fixed length, css_unit unit,
+			const css_computed_style *style,
+			const css_unit_ctx *unit_len_ctx)
+{
+	if (unit == CSS_UNIT_PCT) {
+		snprintf(buf, len, "%g%%", FIXTOFLT(length));
+	} else {
+		snprintf(buf, len, "%gpx", FIXTOFLT(css_unit_len2device_px(
+				style, unit_len_ctx, length, unit)));
+	}
+}
+
+
+/**
+ * Get the computed value of a border radius property.
+ *
+ * \return the value, or NULL if the property is not one of these
+ */
+static char *
+html_layout_radius_value(const css_computed_style *style,
+			 const css_unit_ctx *unit_len_ctx,
+			 const char *property)
+{
+	static const struct {
+		const char *name;
+		uint8_t (*get)(const css_computed_style *style,
+				css_fixed *hlength, css_unit *hunit,
+				css_fixed *vlength, css_unit *vunit);
+	} corners[4] = {
+		{ "border-top-left-radius", css_computed_border_top_left_radius },
+		{ "border-top-right-radius", css_computed_border_top_right_radius },
+		{ "border-bottom-right-radius", css_computed_border_bottom_right_radius },
+		{ "border-bottom-left-radius", css_computed_border_bottom_left_radius },
+	};
+	char h[4][32], v[4][32];
+	char buf[512];
+	bool same_h = true, same_v = true, h_eq_v = true;
+	unsigned int i;
+
+	for (i = 0; i < 4; i++) {
+		css_fixed hl = 0, vl = 0;
+		css_unit hu = CSS_UNIT_PX, vu = CSS_UNIT_PX;
+
+		corners[i].get(style, &hl, &hu, &vl, &vu);
+		html_layout_radius_text(h[i], sizeof h[i], hl, hu, style,
+					unit_len_ctx);
+		html_layout_radius_text(v[i], sizeof v[i], vl, vu, style,
+					unit_len_ctx);
+
+		if (strcmp(property, corners[i].name) == 0) {
+			if (strcmp(h[i], v[i]) == 0) {
+				return strdup(h[i]);
+			}
+			snprintf(buf, sizeof buf, "%s %s", h[i], v[i]);
+			return strdup(buf);
+		}
+	}
+
+	if (strcmp(property, "border-radius") != 0 &&
+	    strcmp(property, "borderRadius") != 0) {
+		return NULL;
+	}
+
+	for (i = 0; i < 4; i++) {
+		same_h = same_h && (strcmp(h[i], h[0]) == 0);
+		same_v = same_v && (strcmp(v[i], v[0]) == 0);
+		h_eq_v = h_eq_v && (strcmp(h[i], v[i]) == 0);
+	}
+
+	if (same_h && same_v) {
+		if (h_eq_v) {
+			return strdup(h[0]);
+		}
+		snprintf(buf, sizeof buf, "%s / %s", h[0], v[0]);
+	} else if (h_eq_v) {
+		snprintf(buf, sizeof buf, "%s %s %s %s", h[0], h[1], h[2], h[3]);
+	} else {
+		snprintf(buf, sizeof buf, "%s %s %s %s / %s %s %s %s",
+			 h[0], h[1], h[2], h[3], v[0], v[1], v[2], v[3]);
+	}
+
+	return strdup(buf);
+}
+
+
+/**
  * Get a used value from a box, such as a margin or size.
  *
  * \return the value, or NULL if the property is not one of these
@@ -441,6 +530,12 @@ html_layout_computed_style(html_content *htmlc,
 
 	value = html_layout_style_value(box->style, box->parent == NULL,
 					property);
+	if (value != NULL) {
+		return value;
+	}
+
+	value = html_layout_radius_value(box->style, &htmlc->unit_len_ctx,
+					 property);
 	if (value != NULL) {
 		return value;
 	}
