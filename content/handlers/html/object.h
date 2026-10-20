@@ -96,4 +96,11 @@ nserror html_object_open_objects(struct html_content *html, struct browser_windo
  */
 nserror html_object_abort_objects(struct html_content *html);
 
+/**
+ * Cancel a reformat scheduled for objects which arrived late.
+ *
+ * \param html The HTML content being destroyed
+ */
+void html_object_cancel_reformat(struct html_content *html);
+
 #endif

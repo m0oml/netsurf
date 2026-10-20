@@ -1394,6 +1394,7 @@ static void html_destroy(struct content *c)
 	NSLOG(netsurf, INFO, "content %p", c);
 
 	html_rebuild_cancel(html);
+	html_object_cancel_reformat(html);
 
 	/* If we're still converting a layout, cancel it */
 	if (html->box_conversion_context != NULL) {

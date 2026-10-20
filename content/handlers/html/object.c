@@ -152,6 +152,37 @@ html_object_nobox_callback(hlcache_handle *object,
 
 
 /**
+ * Scheduled reformat of a document for objects which arrived after it
+ * was done.
+ */
+static void html_object_reformat_cb(void *p)
+{
+	html_content *c = p;
+
+	c->reformat_pending = false;
+
+	if ((c->base.status == CONTENT_STATUS_READY ||
+	     c->base.status == CONTENT_STATUS_DONE) &&
+	    c->had_initial_layout &&
+	    (c->base.locked == false) &&
+	    (c->reflowing == false)) {
+		content__reformat(&c->base, false, c->base.available_width,
+				  c->base.available_height);
+	}
+}
+
+
+/* exported interface documented in html/object.h */
+void html_object_cancel_reformat(struct html_content *c)
+{
+	if (c->reformat_pending) {
+		guit->misc->schedule(-1, html_object_reformat_cb, c);
+		c->reformat_pending = false;
+	}
+}
+
+
+/**
  * Callback for hlcache_handle_retrieve() for objects with a box.
  */
 static nserror
@@ -497,6 +528,27 @@ html_object_callback(hlcache_handle *object,
 		content__reformat(&c->base, false, c->base.available_width,
 				c->base.available_height);
 		html_set_done(c);
+	} else if (event->type == CONTENT_MSG_DONE &&
+		   box != NULL &&
+		   !(box->flags & REPLACE_DIM) &&
+		   c->base.status == CONTENT_STATUS_DONE) {
+		/* An object arrived after the document was done, as the
+		 * box tree was rebuilt, so no reformat for the arrival of
+		 * all objects will follow.  Reformat now, or once enough
+		 * time has passed since the previous reformat.
+		 */
+		uint64_t ms_now;
+		nsu_getmonotonic_ms(&ms_now);
+		if (ms_now > c->base.reformat_time) {
+			content__reformat(&c->base,
+					  false,
+					  c->base.available_width,
+					  c->base.available_height);
+		} else if (c->reformat_pending == false) {
+			c->reformat_pending = true;
+			guit->misc->schedule(c->base.reformat_time - ms_now,
+					     html_object_reformat_cb, c);
+		}
 	} else if (nsoption_bool(incremental_reflow) &&
 		   event->type == CONTENT_MSG_DONE &&
 		   box != NULL &&

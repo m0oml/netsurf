@@ -156,6 +156,8 @@ typedef struct html_content {
 	bool forms_retrieved;
 	/** Whether the load event has been fired */
 	bool load_fired;
+	/** Whether a reformat for objects which arrived late is scheduled */
+	bool reformat_pending;
 	/**
 	 * Number of operations in progress which hold box pointers while
 	 * running scripts.  The box tree is not rebuilt synchronously,
