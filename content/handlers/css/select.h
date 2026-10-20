@@ -54,6 +54,17 @@ css_computed_style *nscss_get_blank_style(nscss_select_ctx *ctx,
 		const css_computed_style *parent);
 
 
+/**
+ * Discard the selection data libcss keeps on a DOM node.
+ *
+ * libcss caches data about a node and its ancestors to speed up
+ * selection.  It must be discarded when the node or its ancestors have
+ * changed, before styles are selected for it again.
+ *
+ * \param n The node whose data should be discarded
+ */
+void nscss_invalidate_node_data(dom_node *n);
+
 css_error named_ancestor_node(void *pw, void *node,
 		const css_qname *qname, void **ancestor);
 

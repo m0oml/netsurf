@@ -239,6 +239,26 @@ static void nscss_dom_user_data_handler(dom_node_operation operation,
 	}
 }
 
+/* exported interface documented in css/select.h */
+void nscss_invalidate_node_data(dom_node *n)
+{
+	void *data = NULL;
+	dom_exception exc;
+	css_error error;
+
+	exc = dom_node_get_user_data(n,
+			corestring_dom___ns_key_libcss_node_data, &data);
+	if ((exc != DOM_NO_ERR) || (data == NULL)) {
+		return;
+	}
+
+	error = css_libcss_node_data_handler(&selection_handler,
+			CSS_NODE_MODIFIED, NULL, n, NULL, data);
+	if (error != CSS_OK) {
+		NSLOG(netsurf, INFO, "Failed to invalidate libcss_node_data.");
+	}
+}
+
 /**
  * Get style selection results for an element
  *
@@ -1744,7 +1764,10 @@ css_error set_libcss_node_data(void *pw, void *node, void *libcss_node_data)
 		return CSS_NOMEM;
 	}
 
-	assert(old_node_data == NULL);
+	/* Data is only set on nodes without any.  libcss also clears it,
+	 * after destroying the old data, when a node is modified.
+	 */
+	assert(libcss_node_data == NULL || old_node_data == NULL);
 
 	return CSS_OK;
 }
