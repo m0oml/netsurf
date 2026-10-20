@@ -68,6 +68,17 @@
 
 #include <dom/dom.h>
 
+/* QuickJS reinterprets doubles as 64 bit integers, which assumes the
+ * IEEE word order.  The FPA format used by the GCCSDK 4 RISC OS
+ * toolchain (arm-unknown-riscos) stores the words the other way round
+ * so numbers would be silently corrupted.  Use the EABI toolchain
+ * (arm-riscos-gnueabi) instead.
+ */
+#if defined(__FLOAT_WORD_ORDER__) && defined(__BYTE_ORDER__) && \
+	(__FLOAT_WORD_ORDER__ != __BYTE_ORDER__)
+#error "QuickJS requires doubles in IEEE word order"
+#endif
+
 #define EVENT_MAGIC MAGIC(EVENT_MAP)
 #define HANDLER_LISTENER_MAGIC MAGIC(HANDLER_LISTENER_MAP)
 #define HANDLER_MAGIC MAGIC(HANDLER_MAP)

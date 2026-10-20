@@ -1041,10 +1041,13 @@ const char *duk_push_lstring(duk_context *ctx, const char *str, duk_size_t len)
 
 	if ((len > 0) && is_magic(str)) {
 		/* hidden names become private symbols */
-		char *name = strndup(str, len);
+		/* strndup() is not available in strict C99 environments */
+		char *name = malloc(len + 1);
 		struct qjsduk_magic *entry = NULL;
 
 		if (name != NULL) {
+			memcpy(name, str, len);
+			name[len] = '\0';
 			entry = magic_get(ctx, name);
 			free(name);
 		}

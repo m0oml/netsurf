@@ -16,8 +16,9 @@ QJS_ENGINE_OBJECTS := $(addprefix $(OBJROOT)/content_handlers_javascript_, \
 
 # The engine requires C11 and is third party code so its warnings are
 # not ours to fix.  These are target specific so they only apply to
-# the engine objects.
-$(QJS_ENGINE_OBJECTS): CFLAGS += -std=gnu11
+# the engine objects.  Some frontends (RISC OS) define a minimal
+# _POSIX_C_SOURCE which hides clock_gettime() so raise it here.
+$(QJS_ENGINE_OBJECTS): CFLAGS += -std=gnu11 -U_POSIX_C_SOURCE -D_POSIX_C_SOURCE=200809L
 $(QJS_ENGINE_OBJECTS): COMMON_WARNFLAGS := -w
 $(QJS_ENGINE_OBJECTS): CWARNFLAGS :=
 
