@@ -520,6 +520,11 @@ static inline int layout_flex__remaining_free_main(
 	for (size_t i = line->first; i < item_count; i++) {
 		struct flex_item_data *item = &ctx->item.data[i];
 
+		if (lh__box_is_absolute(item->box)) {
+			/* takes no space on the line */
+			continue;
+		}
+
 		if (item->freeze) {
 			remaining_free_main -= item->target_main_size;
 		} else {
@@ -728,6 +733,15 @@ static bool layout_flex__resolve_line(
 	for (size_t i = line->first; i < item_count; i++) {
 		struct flex_item_data *item = &ctx->item.data[i];
 
+		if (lh__box_is_absolute(item->box)) {
+			/* Not a flex item, so it keeps its own size and
+			 * takes no space on the line
+			 */
+			item->target_main_size = item->main_size;
+			layout_flex__item_freeze(line, item);
+			continue;
+		}
+
 		/* 3. Size inflexible items */
 		if (grow) {
 			if (item->grow == 0 ||
@@ -807,6 +821,7 @@ static bool layout_flex__place_line_items_main(
 		struct flex_line_data *line)
 {
 	int main_pos = ctx->flex->padding[layout_flex__main_start_side(ctx)];
+	int start_pos;
 	int post_multiplier = ctx->main_reversed ? 0 : 1;
 	int pre_multiplier = ctx->main_reversed ? -1 : 0;
 	size_t item_count = line->first + line->count;
@@ -817,6 +832,11 @@ static bool layout_flex__place_line_items_main(
 		main_pos = lh__box_size_main(ctx->horizontal, ctx->flex) -
 				main_pos;
 	}
+
+	/* absolutely positioned children are placed as if they were the
+	 * only item, at the start of the container
+	 */
+	start_pos = main_pos;
 
 	if (ctx->available_main != AUTO &&
 	    ctx->available_main != UNKNOWN_WIDTH &&
@@ -866,8 +886,17 @@ static bool layout_flex__place_line_items_main(
 					 lh__delta_outer_main(ctx->flex, b));
 		}
 
-		*box_pos_main = main_pos + lh__non_auto_margin(b, main_start) +
-				extra_pre + b->border[main_start].width;
+		if (lh__box_is_absolute(b)) {
+			*box_pos_main = start_pos + pre_multiplier *
+					(box_size_main + lh__delta_outer_main(
+							ctx->flex, b)) +
+					lh__non_auto_margin(b, main_start) +
+					b->border[main_start].width;
+		} else {
+			*box_pos_main = main_pos +
+					lh__non_auto_margin(b, main_start) +
+					extra_pre + b->border[main_start].width;
+		}
 
 		if (!lh__box_is_absolute(b)) {
 			int cross_size;
