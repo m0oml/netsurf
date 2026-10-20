@@ -98,6 +98,10 @@ struct fetch {
 	void *fetcher_handle;	/**< The handle for the fetcher. */
 	bool fetch_is_active;	/**< This fetch is active. */
 	fetch_msg_type last_msg;/**< The last message sent for this fetch */
+	char *method;		/**< Request method, or NULL for the default */
+	uint8_t *body;		/**< Raw request body, or NULL */
+	size_t body_len;	/**< Byte length of body */
+	bool omit_credentials;	/**< Do not send or store credentials */
 	struct fetch *r_prev;	/**< Previous active fetch in ::fetch_ring. */
 	struct fetch *r_next;	/**< Next active fetch in ::fetch_ring. */
 };
@@ -444,19 +448,35 @@ fetch_fdset(fd_set *read_fd_set,
 	return NSERROR_OK;
 }
 
-/* exported interface documented in content/fetch.h */
-nserror
-fetch_start(nsurl *url,
-	    nsurl *referer,
-	    fetch_callback callback,
-	    void *p,
-	    bool only_2xx,
-	    const char *post_urlenc,
-	    const struct fetch_multipart_data *post_multipart,
-	    bool verifiable,
-	    bool downgrade_tls,
-	    const char *headers[],
-	    struct fetch **fetch_out)
+/**
+ * Free the request details of a fetch.
+ */
+static void fetch_free_request(struct fetch *fetch)
+{
+	free(fetch->method);
+	free(fetch->body);
+}
+
+
+/**
+ * Start a fetch, with optional request details.
+ *
+ * \param request The request method, body and credentials mode, or NULL
+ * \see fetch_start for the other parameters
+ */
+static nserror
+fetch__start(nsurl *url,
+	     nsurl *referer,
+	     fetch_callback callback,
+	     void *p,
+	     bool only_2xx,
+	     const char *post_urlenc,
+	     const struct fetch_multipart_data *post_multipart,
+	     bool verifiable,
+	     bool downgrade_tls,
+	     const char *headers[],
+	     const struct fetch_request *request,
+	     struct fetch **fetch_out)
 {
 	struct fetch *fetch;
 	lwc_string *scheme;
@@ -464,6 +484,37 @@ fetch_start(nsurl *url,
 	fetch = calloc(1, sizeof (*fetch));
 	if (fetch == NULL) {
 		return NSERROR_NOMEM;
+	}
+
+	if (request != NULL) {
+		/* requests always have a method so fetchers can tell
+		 * them from other fetches
+		 */
+		if (request->method != NULL) {
+			fetch->method = strdup(request->method);
+		} else if (request->body != NULL) {
+			fetch->method = strdup("POST");
+		} else {
+			fetch->method = strdup("GET");
+		}
+		if (fetch->method == NULL) {
+			free(fetch);
+			return NSERROR_NOMEM;
+		}
+		if (request->body != NULL) {
+			/* allocate at least one byte so an empty body
+			 * is distinct from no body
+			 */
+			fetch->body = malloc(request->body_len + 1);
+			if (fetch->body == NULL) {
+				fetch_free_request(fetch);
+				free(fetch);
+				return NSERROR_NOMEM;
+			}
+			memcpy(fetch->body, request->body, request->body_len);
+			fetch->body_len = request->body_len;
+		}
+		fetch->omit_credentials = request->omit_credentials;
 	}
 
 	/* The URL we're fetching must have a scheme */
@@ -474,6 +525,7 @@ fetch_start(nsurl *url,
 	fetch->fetcherd = get_fetcher_for_scheme(scheme);
 	lwc_string_unref(scheme);
 	if (fetch->fetcherd == -1) {
+		fetch_free_request(fetch);
 		free(fetch);
 		return NSERROR_NO_FETCH_HANDLER;
 	}
@@ -505,6 +557,7 @@ fetch_start(nsurl *url,
 		if (fetch->referer != NULL)
 			nsurl_unref(fetch->referer);
 
+		fetch_free_request(fetch);
 		free(fetch);
 
 
@@ -529,6 +582,40 @@ fetch_start(nsurl *url,
 
 	*fetch_out = fetch;
 	return NSERROR_OK;
+}
+
+/* exported interface documented in content/fetch.h */
+nserror
+fetch_start(nsurl *url,
+	    nsurl *referer,
+	    fetch_callback callback,
+	    void *p,
+	    bool only_2xx,
+	    const char *post_urlenc,
+	    const struct fetch_multipart_data *post_multipart,
+	    bool verifiable,
+	    bool downgrade_tls,
+	    const char *headers[],
+	    struct fetch **fetch_out)
+{
+	return fetch__start(url, referer, callback, p, only_2xx,
+			    post_urlenc, post_multipart, verifiable,
+			    downgrade_tls, headers, NULL, fetch_out);
+}
+
+/* exported interface documented in content/fetch.h */
+nserror
+fetch_start_request(nsurl *url,
+		    nsurl *referer,
+		    fetch_callback callback,
+		    void *p,
+		    const struct fetch_request *request,
+		    const char *headers[],
+		    struct fetch **fetch_out)
+{
+	return fetch__start(url, referer, callback, p, false,
+			    NULL, NULL, false, false, headers,
+			    request, fetch_out);
 }
 
 /* exported interface documented in content/fetch.h */
@@ -573,6 +660,7 @@ void fetch_free(struct fetch *f)
 		nsurl_unref(f->referer);
 	}
 	lwc_string_unref(f->host);
+	fetch_free_request(f);
 	free(f);
 }
 
@@ -802,6 +890,10 @@ void fetch_set_cookie(struct fetch *fetch, const char *data)
 {
 	assert(fetch && data);
 
+	if (fetch->omit_credentials) {
+		return;
+	}
+
 	/* If the fetch is unverifiable err on the side of caution and
 	 * do not set the cookie */
 
@@ -820,4 +912,26 @@ void fetch_set_cookie(struct fetch *fetch, const char *data)
 		 * for the fetch will be the nested object's URI. */
 		urldb_set_cookie(data, fetch->url, fetch->referer);
 	}
+}
+
+
+/* exported interface documented in content/fetch.h */
+const char *fetch_get_method(const struct fetch *fetch)
+{
+	return fetch->method;
+}
+
+
+/* exported interface documented in content/fetch.h */
+const uint8_t *fetch_get_body(const struct fetch *fetch, size_t *len)
+{
+	*len = fetch->body_len;
+	return fetch->body;
+}
+
+
+/* exported interface documented in content/fetch.h */
+bool fetch_get_omit_credentials(const struct fetch *fetch)
+{
+	return fetch->omit_credentials;
 }

@@ -135,6 +135,20 @@ struct fetch_postdata {
 typedef void (*fetch_callback)(const fetch_msg *msg, void *p);
 
 /**
+ * Request details for fetches which are not plain GET or form POST.
+ */
+struct fetch_request {
+	/** Request method, or NULL for GET (POST if there is a body) */
+	const char *method;
+	/** Raw request body, or NULL for none */
+	const uint8_t *body;
+	/** Byte length of body */
+	size_t body_len;
+	/** Do not send or store cookies or HTTP authentication */
+	bool omit_credentials;
+};
+
+/**
  * Start fetching data for the given URL.
  *
  * The function returns immediately. The fetch may be queued for later
@@ -170,6 +184,28 @@ nserror fetch_start(nsurl *url, nsurl *referer, fetch_callback callback,
 		    const struct fetch_multipart_data *post_multipart,
 		    bool verifiable, bool downgrade_tls,
 		    const char *headers[], struct fetch **fetch_out);
+
+/**
+ * Start fetching data for a URL with a given method and raw body.
+ *
+ * This is used for requests made by scripts.  Fetches are unverifiable
+ * and every HTTP response other than a redirect is reported as data,
+ * including 401 and 304 responses.  Otherwise the fetch proceeds as for
+ * fetch_start().
+ *
+ * \param url URL to fetch
+ * \param referer Referring URL, or NULL
+ * \param callback Callback for fetch messages
+ * \param p Private data for callback
+ * \param request The request method, body and credentials mode
+ * \param headers NULL terminated list of extra request header lines
+ * \param fetch_out Updated with the new fetch
+ * \return NSERROR_OK and fetch_out updated else appropriate error code
+ */
+nserror fetch_start_request(nsurl *url, nsurl *referer,
+		fetch_callback callback, void *p,
+		const struct fetch_request *request,
+		const char *headers[], struct fetch **fetch_out);
 
 /**
  * Abort a fetch.
@@ -259,6 +295,28 @@ nserror fetch_set_http_code(struct fetch *fetch, http_response_code http_code);
  * set cookie data on a fetch
  */
 void fetch_set_cookie(struct fetch *fetch, const char *data);
+
+/**
+ * Get the request method of a fetch.
+ *
+ * \return The method, or NULL for fetches not started with
+ *         fetch_start_request()
+ */
+const char *fetch_get_method(const struct fetch *fetch);
+
+/**
+ * Get the raw request body of a fetch.
+ *
+ * \param fetch The fetch
+ * \param len Updated with the byte length of the body
+ * \return The body, or NULL if there is none
+ */
+const uint8_t *fetch_get_body(const struct fetch *fetch, size_t *len);
+
+/**
+ * Find whether a fetch must not send or store credentials.
+ */
+bool fetch_get_omit_credentials(const struct fetch *fetch);
 
 /**
  * Get the set of file descriptors the fetchers are currently using.

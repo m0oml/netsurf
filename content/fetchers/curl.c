@@ -250,6 +250,10 @@ struct curl_fetch_info {
 	char *realm;		/**< HTTP Auth Realm */
 	struct fetch_postdata *postdata; /**< POST data */
 	NSCURL_POSTDATA_T *curl_postdata; /**< POST data in curl representation */
+	const char *method;	/**< Request method, or NULL for the default */
+	const uint8_t *body;	/**< Raw request body, or NULL */
+	size_t body_len;	/**< Byte length of body */
+	bool omit_credentials;	/**< Do not send cookies or authentication */
 
 	long http_code; /**< HTTP result code from cURL. */
 
@@ -501,6 +505,11 @@ fetch_curl_setup(struct fetch *parent_fetch,
 	if (fetch->postdata == NULL) {
 		goto failed;
 	}
+
+	/* the parent fetch owns these for the life of this fetch */
+	fetch->method = fetch_get_method(parent_fetch);
+	fetch->body = fetch_get_body(parent_fetch, &fetch->body_len);
+	fetch->omit_credentials = fetch_get_omit_credentials(parent_fetch);
 
 #define APPEND(list, value) \
 	slist = curl_slist_append(list, value);		\
@@ -1129,7 +1138,17 @@ static CURLcode fetch_curl_set_postdata(struct curl_fetch_info *f)
 		return code;					\
 	}
 
-	switch (f->postdata->type) {
+	/* handles are reused so reset options a previous fetch may set */
+	SETOPT(CURLOPT_NOBODY, 0L);
+	SETOPT(CURLOPT_CUSTOMREQUEST, NULL);
+	SETOPT(CURLOPT_POSTFIELDSIZE, -1L);
+
+	if (f->body != NULL) {
+		SETOPT(NSCURL_POSTDATA_CURLOPT, NULL);
+		SETOPT(CURLOPT_HTTPGET, 0L);
+		SETOPT(CURLOPT_POSTFIELDSIZE, (long) f->body_len);
+		SETOPT(CURLOPT_POSTFIELDS, f->body);
+	} else switch (f->postdata->type) {
 	case FETCH_POSTDATA_NONE:
 		SETOPT(CURLOPT_POSTFIELDS, NULL);
 		SETOPT(NSCURL_POSTDATA_CURLOPT, NULL);
@@ -1153,6 +1172,16 @@ static CURLcode fetch_curl_set_postdata(struct curl_fetch_info *f)
 		SETOPT(NSCURL_POSTDATA_CURLOPT, f->curl_postdata);
 		break;
 	}
+
+	if (f->method != NULL) {
+		if (strcmp(f->method, "HEAD") == 0) {
+			SETOPT(CURLOPT_NOBODY, 1L);
+		} else if (strcmp(f->method, "GET") != 0 &&
+			   strcmp(f->method, "POST") != 0) {
+			SETOPT(CURLOPT_CUSTOMREQUEST, f->method);
+		}
+	}
+
 	return code;
 }
 
@@ -1185,14 +1214,17 @@ static CURLcode fetch_curl_set_options(struct curl_fetch_info *f)
 		return code;
 	}
 
-	f->cookie_string = urldb_get_cookie(f->url, true);
+	if (f->omit_credentials == false) {
+		f->cookie_string = urldb_get_cookie(f->url, true);
+	}
 	if (f->cookie_string) {
 		SETOPT(CURLOPT_COOKIE, f->cookie_string);
 	} else {
 		SETOPT(CURLOPT_COOKIE, NULL);
 	}
 
-	if ((auth = urldb_get_auth_details(f->url, NULL)) != NULL) {
+	if ((f->omit_credentials == false) &&
+	    ((auth = urldb_get_auth_details(f->url, NULL)) != NULL)) {
 		SETOPT(CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
 		SETOPT(CURLOPT_USERPWD, auth);
 	} else {
@@ -1484,7 +1516,11 @@ static bool fetch_curl_process_headers(struct curl_fetch_info *f)
 	http_code = f->http_code;
 	NSLOG(netsurf, INFO, "HTTP status code %li", http_code);
 
+	/* requests with an explicit method, from scripts, get every
+	 * response other than redirects as it is
+	 */
 	if ((http_code == HTTP_RESPONSE_NOT_MODIFIED) &&
+	    (f->method == NULL) &&
 	    (f->postdata->type==FETCH_POSTDATA_NONE)) {
 		/* Not Modified && GET request */
 		msg.type = FETCH_NOTMODIFIED;
@@ -1502,7 +1538,7 @@ static bool fetch_curl_process_headers(struct curl_fetch_info *f)
 	}
 
 	/* handle HTTP 401 (Authentication errors) */
-	if (http_code == HTTP_RESPONSE_UNAUTHORIZED) {
+	if ((http_code == HTTP_RESPONSE_UNAUTHORIZED) && (f->method == NULL)) {
 		msg.type = FETCH_AUTH;
 		msg.data.auth.realm = f->realm;
 		fetch_send_callback(&msg, f->fetch_handle);
@@ -1828,9 +1864,10 @@ static size_t fetch_curl_data(char *data, size_t size, size_t nmemb, void *_f)
 	}
 
 	/* ignore body if this is a 401 reply by skipping it and reset
-	 * the HTTP response code to enable follow up fetches.
+	 * the HTTP response code to enable follow up fetches.  Requests
+	 * from scripts get the body.
 	 */
-	if (f->http_code == HTTP_RESPONSE_UNAUTHORIZED) {
+	if ((f->http_code == HTTP_RESPONSE_UNAUTHORIZED) && (f->method == NULL)) {
 		f->http_code = 0;
 		return size * nmemb;
 	}
