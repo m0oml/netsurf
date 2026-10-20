@@ -280,6 +280,7 @@ static void monkey_run(void)
 	int max_fd;
 	int rdy_fd;
 	int schedtm;
+	int earliest;
 	struct timeval tv;
 	struct timeval* timeout;
 
@@ -288,8 +289,15 @@ static void monkey_run(void)
 		/* discover the next scheduled event time */
 		schedtm = monkey_schedule_run();
 
-		/* clears fdset */
+		/* clears fdset, and progresses fetches, which may
+		 * schedule callbacks the timeout must allow for
+		 */
+		monkey_schedule_mark();
 		fetch_fdset(&read_fd_set, &write_fd_set, &exc_fd_set, &max_fd);
+		earliest = monkey_schedule_earliest();
+		if (earliest >= 0 && (schedtm < 0 || earliest < schedtm)) {
+			schedtm = earliest;
+		}
 
 		/* add stdin to the set */
 		if (max_fd < 0) {

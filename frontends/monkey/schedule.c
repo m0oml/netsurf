@@ -27,6 +27,9 @@
 /* linked list of scheduled callbacks */
 static struct nscallback *schedule_list = NULL;
 
+/** shortest delay of callbacks added since monkey_schedule_mark(), or -1 */
+static int schedule_earliest = -1;
+
 /**
  * scheduled callback.
  */
@@ -110,6 +113,10 @@ nserror monkey_schedule(int tival, void (*callback)(void *p), void *p)
 	}
 
 	NSLOG(schedule, DEBUG, "Adding %p(%p) in %d", callback, p, tival);
+
+	if (schedule_earliest < 0 || tival < schedule_earliest) {
+		schedule_earliest = tival;
+	}
 
 	tv.tv_sec = tival / 1000; /* miliseconds to seconds */
 	tv.tv_usec = (tival % 1000) * 1000; /* remainder to microseconds */
@@ -214,4 +221,16 @@ void monkey_schedule_list(void)
 		      (long long)cur_nscb->tv.tv_sec, cur_nscb->tv.tv_usec);
 		cur_nscb = cur_nscb->next;
 	}
+}
+
+/* exported function documented in monkey/schedule.h */
+void monkey_schedule_mark(void)
+{
+	schedule_earliest = -1;
+}
+
+/* exported function documented in monkey/schedule.h */
+int monkey_schedule_earliest(void)
+{
+	return schedule_earliest;
 }

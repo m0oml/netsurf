@@ -45,4 +45,16 @@ int monkey_schedule_run(void);
  */
 void monkey_schedule_list(void);
 
+/**
+ * Start noting the shortest delay of callbacks scheduled.
+ */
+void monkey_schedule_mark(void);
+
+/**
+ * Get the shortest delay of callbacks scheduled since monkey_schedule_mark().
+ *
+ * \return The delay in ms or -1 if nothing has been scheduled
+ */
+int monkey_schedule_earliest(void);
+
 #endif
