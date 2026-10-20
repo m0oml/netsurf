@@ -138,6 +138,10 @@ typedef struct html_content {
 	void *box_conversion_context;
 	/** Box tree, or NULL. */
 	struct box *layout;
+	/** Whether a rebuild of the box tree is scheduled */
+	bool rebuild_pending;
+	/** Whether the box tree is being rebuilt */
+	bool rebuilding;
 	/** Document background colour. */
 	colour background_colour;
 
@@ -235,6 +239,40 @@ void html__redraw_a_box(html_content *htmlc, struct box *box);
  * \param htmlc Content to convert
  */
 void html_finish_conversion(html_content *htmlc);
+
+
+/* in html/rebuild.c */
+
+/**
+ * Note a change to the document which may need the box tree rebuilt.
+ *
+ * Changes after the box tree has been built schedule a rebuild of the
+ * box tree, which is coalesced with any other changes made before it
+ * runs.
+ *
+ * \param htmlc HTML content whose document changed
+ * \param node The node which changed
+ */
+void html_dom_changed(html_content *htmlc, struct dom_node *node);
+
+
+/**
+ * Rebuild the box tree now if a rebuild is pending.
+ *
+ * Used when up to date layout is needed, such as when a script asks for
+ * the position of an element.
+ *
+ * \param htmlc HTML content to update
+ */
+void html_rebuild_flush(html_content *htmlc);
+
+
+/**
+ * Cancel any pending rebuild of the box tree.
+ *
+ * \param htmlc HTML content being destroyed
+ */
+void html_rebuild_cancel(html_content *htmlc);
 
 
 /**

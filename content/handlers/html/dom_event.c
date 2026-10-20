@@ -718,6 +718,9 @@ dom_default_action_DOMSubtreeModified_cb(struct dom_event *evt, void *pw)
 			return;
 		}
 
+		/* The box tree may need rebuilding to show the change */
+		html_dom_changed(htmlc, (dom_node *)node);
+
 		exc = dom_node_get_node_type(node, &type);
 		if ((exc == DOM_NO_ERR) && (type == DOM_ELEMENT_NODE)) {
 			/* an element node has been modified */
