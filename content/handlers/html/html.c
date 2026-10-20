@@ -280,6 +280,21 @@ static void html_box_convert_done(html_content *c, bool success)
 	dom_node_unref(html);
 }
 
+/* exported interface documented in html/private.h */
+void html_set_done(html_content *htmlc)
+{
+	/* fire a simple event named load at the Document's Window
+	 * object, but with its target set to the Document object (and
+	 * the currentTarget set to the Window object)
+	 */
+	if ((htmlc->jsthread != NULL) && (htmlc->load_fired == false)) {
+		htmlc->load_fired = true;
+		js_fire_event(htmlc->jsthread, "load", htmlc->document, NULL);
+	}
+
+	content_set_done(&htmlc->base);
+}
+
 /* Documented in html_internal.h */
 nserror
 html_proceed_to_done(html_content *html)
@@ -287,7 +302,7 @@ html_proceed_to_done(html_content *html)
 	switch (content__get_status(&html->base)) {
 	case CONTENT_STATUS_READY:
 		if (html->base.active == 0) {
-			content_set_done(&html->base);
+			html_set_done(html);
 			return NSERROR_OK;
 		}
 		break;
@@ -303,7 +318,15 @@ html_proceed_to_done(html_content *html)
 }
 
 
-static void html_get_dimensions(html_content *htmlc)
+/**
+ * Set up the media and unit length context for the browser window size.
+ *
+ * \param htmlc Content to update
+ * \param width Updated with the viewport width in device pixels, or NULL
+ * \param height Updated with the viewport height in device pixels, or NULL
+ */
+static void
+html_get_dimensions(html_content *htmlc, unsigned *width, unsigned *height)
 {
 	css_fixed device_dpi = nscss_screen_dpi;
 	unsigned f_size;
@@ -319,6 +342,12 @@ static void html_get_dimensions(html_content *htmlc)
 
 	content_broadcast(&htmlc->base, CONTENT_MSG_GETDIMS, &msg_data);
 
+	if (width != NULL) {
+		*width = w;
+	}
+	if (height != NULL) {
+		*height = h;
+	}
 
 	w = css_unit_device2css_px(INTTOFIX(w), device_dpi);
 	h = css_unit_device2css_px(INTTOFIX(h), device_dpi);
@@ -337,6 +366,8 @@ static void html_get_dimensions(html_content *htmlc)
 	htmlc->unit_len_ctx.font_size_minimum = f_min;
 }
 
+static void html_early_layout_discard(html_content *htmlc);
+
 /* exported function documented in html/html_internal.h */
 void html_finish_conversion(html_content *htmlc)
 {
@@ -350,6 +381,13 @@ void html_finish_conversion(html_content *htmlc)
 		content_broadcast_error(&htmlc->base, NSERROR_STOPPED, NULL);
 		content_set_error(&htmlc->base);
 		return;
+	}
+
+	/* An early box tree, built for scripts, is replaced by one built
+	 * from the loaded document
+	 */
+	if (htmlc->early_layout) {
+		html_early_layout_discard(htmlc);
 	}
 
 	/* If we already have a selection context, then we have already
@@ -376,15 +414,6 @@ void html_finish_conversion(html_content *htmlc)
 		return;
 	}
 
-
-	/* fire a simple event named load at the Document's Window
-	 * object, but with its target set to the Document object (and
-	 * the currentTarget set to the Window object)
-	 */
-	if (htmlc->jsthread != NULL) {
-		js_fire_event(htmlc->jsthread, "load", htmlc->document, NULL);
-	}
-
 	/* convert dom tree to box tree */
 	NSLOG(netsurf, INFO, "DOM to box (%p)", htmlc);
 	content_set_status(&htmlc->base, messages_get("Processing"));
@@ -399,7 +428,7 @@ void html_finish_conversion(html_content *htmlc)
 		return;
 	}
 
-	html_get_dimensions(htmlc);
+	html_get_dimensions(htmlc, NULL, NULL);
 
 	error = dom_to_box(html, htmlc, html_box_convert_done, &htmlc->box_conversion_context);
 	if (error != NSERROR_OK) {
@@ -829,12 +858,89 @@ bool html_can_begin_conversion(html_content *htmlc)
 	return true;
 }
 
+/**
+ * Get the forms of a document, once its parse has been completed.
+ *
+ * The forms are retrieved once, either when the conversion begins or
+ * when an early layout needs them first.
+ *
+ * \param htmlc Content whose forms are wanted
+ * \return NSERROR_OK on success, or an error
+ */
+static nserror html_retrieve_forms(html_content *htmlc)
+{
+	struct form *f;
+	nserror err;
+
+	if (htmlc->forms_retrieved) {
+		return NSERROR_OK;
+	}
+
+	/* get encoding */
+	if (htmlc->encoding == NULL) {
+		const char *encoding;
+
+		encoding = dom_hubbub_parser_get_encoding(htmlc->parser,
+					&htmlc->encoding_source);
+		if (encoding == NULL) {
+			return NSERROR_NOMEM;
+		}
+
+		htmlc->encoding = strdup(encoding);
+		if (htmlc->encoding == NULL) {
+			return NSERROR_NOMEM;
+		}
+	}
+
+	/* Retrieve forms from parser */
+	htmlc->forms = html_forms_get_forms(htmlc->encoding,
+			(dom_html_document *) htmlc->document);
+	htmlc->forms_retrieved = true;
+
+	for (f = htmlc->forms; f != NULL; f = f->prev) {
+		nsurl *action;
+
+		/* Make all actions absolute */
+		if (f->action == NULL || f->action[0] == '\0') {
+			/* HTML5 4.10.22.3 step 9 */
+			nsurl *doc_addr = content_get_url(&htmlc->base);
+			err = nsurl_join(htmlc->base_url,
+					 nsurl_access(doc_addr),
+					 &action);
+		} else {
+			err = nsurl_join(htmlc->base_url,
+					 f->action,
+					 &action);
+		}
+
+		if (err != NSERROR_OK) {
+			return err;
+		}
+
+		free(f->action);
+		f->action = strdup(nsurl_access(action));
+		nsurl_unref(action);
+		if (f->action == NULL) {
+			return NSERROR_NOMEM;
+		}
+
+		/* Ensure each form has a document encoding */
+		if (f->document_charset == NULL) {
+			f->document_charset = strdup(htmlc->encoding);
+			if (f->document_charset == NULL) {
+				return NSERROR_NOMEM;
+			}
+		}
+	}
+
+	return NSERROR_OK;
+}
+
 bool
 html_begin_conversion(html_content *htmlc)
 {
 	dom_node *html;
 	nserror ns_error;
-	struct form *f;
 	dom_exception exc; /* returned by libdom functions */
 	dom_string *node_name = NULL;
 	dom_hubbub_error error;
@@ -903,28 +1009,6 @@ html_begin_conversion(html_content *htmlc)
 			      (struct dom_node *)htmlc->document);
 	}
 
-	/* get encoding */
-	if (htmlc->encoding == NULL) {
-		const char *encoding;
-
-		encoding = dom_hubbub_parser_get_encoding(htmlc->parser,
-					&htmlc->encoding_source);
-		if (encoding == NULL) {
-			content_broadcast_error(&htmlc->base,
-						NSERROR_NOMEM,
-						NULL);
-			return false;
-		}
-
-		htmlc->encoding = strdup(encoding);
-		if (htmlc->encoding == NULL) {
-			content_broadcast_error(&htmlc->base,
-						NSERROR_NOMEM,
-						NULL);
-			return false;
-		}
-	}
-
 	/* locate root element and ensure it is html */
 	exc = dom_document_get_document_element(htmlc->document, (void *) &html);
 	if ((exc != DOM_NO_ERR) || (html == NULL)) {
@@ -944,59 +1028,13 @@ html_begin_conversion(html_content *htmlc)
 		return false;
 	}
 	dom_string_unref(node_name);
-
-	/* Retrieve forms from parser */
-	htmlc->forms = html_forms_get_forms(htmlc->encoding,
-			(dom_html_document *) htmlc->document);
-	for (f = htmlc->forms; f != NULL; f = f->prev) {
-		nsurl *action;
-
-		/* Make all actions absolute */
-		if (f->action == NULL || f->action[0] == '\0') {
-			/* HTML5 4.10.22.3 step 9 */
-			nsurl *doc_addr = content_get_url(&htmlc->base);
-			ns_error = nsurl_join(htmlc->base_url,
-					      nsurl_access(doc_addr),
-					      &action);
-		} else {
-			ns_error = nsurl_join(htmlc->base_url,
-					      f->action,
-					      &action);
-		}
-
-		if (ns_error != NSERROR_OK) {
-			content_broadcast_error(&htmlc->base, ns_error, NULL);
-
-			dom_node_unref(html);
-			return false;
-		}
-
-		free(f->action);
-		f->action = strdup(nsurl_access(action));
-		nsurl_unref(action);
-		if (f->action == NULL) {
-			content_broadcast_error(&htmlc->base,
-						NSERROR_NOMEM,
-						NULL);
-
-			dom_node_unref(html);
-			return false;
-		}
-
-		/* Ensure each form has a document encoding */
-		if (f->document_charset == NULL) {
-			f->document_charset = strdup(htmlc->encoding);
-			if (f->document_charset == NULL) {
-				content_broadcast_error(&htmlc->base,
-							NSERROR_NOMEM,
-							NULL);
-				dom_node_unref(html);
-				return false;
-			}
-		}
-	}
-
 	dom_node_unref(html);
+
+	ns_error = html_retrieve_forms(htmlc);
+	if (ns_error != NSERROR_OK) {
+		content_broadcast_error(&htmlc->base, ns_error, NULL);
+		return false;
+	}
 
 	if (htmlc->base.active == 0) {
 		html_finish_conversion(htmlc);
@@ -1034,7 +1072,7 @@ static void html_stop(struct content *c)
 		/* If there are no further active fetches and we're still
 		 * in the READY state, transition to the DONE state. */
 		if (c->status == CONTENT_STATUS_READY && c->active == 0) {
-			content_set_done(c);
+			html_set_done(htmlc);
 		}
 
 		break;
@@ -1199,6 +1237,150 @@ static void html_free_layout(html_content *htmlc)
 		talloc_free(htmlc->bctx);
 	}
 }
+
+
+/**
+ * Free an early box tree and the state built with it.
+ *
+ * \param htmlc Content with an early box tree
+ */
+static void html_early_layout_discard(html_content *htmlc)
+{
+	NSLOG(netsurf, INFO, "Discarding early box tree (content %p)", htmlc);
+
+	if (htmlc->layout != NULL) {
+		html_rebuild_detach(htmlc, htmlc->layout);
+		htmlc->layout = NULL;
+	}
+
+	if (htmlc->iframe != NULL) {
+		html_destroy_iframe(htmlc->iframe);
+		htmlc->iframe = NULL;
+	}
+
+	if (htmlc->frameset != NULL) {
+		html_destroy_frameset(htmlc->frameset);
+		talloc_free(htmlc->frameset);
+		htmlc->frameset = NULL;
+	}
+
+	/* no objects are fetched for an early box tree */
+	html_object_free_list(htmlc, htmlc->object_list);
+	htmlc->object_list = NULL;
+	htmlc->num_objects = 0;
+
+	html_free_layout(htmlc);
+	htmlc->bctx = NULL;
+
+	if (htmlc->select_ctx != NULL) {
+		css_select_ctx_destroy(htmlc->select_ctx);
+		htmlc->select_ctx = NULL;
+	}
+
+	htmlc->had_initial_layout = false;
+	htmlc->early_layout = false;
+	htmlc->early_layout_stale = false;
+}
+
+
+/**
+ * Callback for completion of an early box tree construction.
+ */
+static void html_early_layout_box_done(html_content *htmlc, bool success)
+{
+	htmlc->early_layout_building = false;
+	if (success == false) {
+		htmlc->early_layout_stale = true;
+	}
+}
+
+
+/* exported interface documented in html/private.h */
+bool html_early_layout(html_content *htmlc)
+{
+	struct content *c = &htmlc->base;
+	unsigned int width = 0;
+	unsigned int height = 0;
+	dom_exception exc;
+	dom_node *html;
+	bool locked;
+	nserror err;
+
+	if (htmlc->early_layout) {
+		if (htmlc->early_layout_stale == false) {
+			return true;
+		}
+		html_early_layout_discard(htmlc);
+	}
+
+	if ((htmlc->layout != NULL) ||
+	    (htmlc->conversion_begun == false) ||
+	    (htmlc->box_conversion_context != NULL) ||
+	    (htmlc->select_ctx != NULL) ||
+	    htmlc->aborted ||
+	    htmlc->reflowing ||
+	    (c->status != CONTENT_STATUS_LOADING)) {
+		/* the document is still being parsed, or its box tree
+		 * is being built normally
+		 */
+		return false;
+	}
+
+	err = html_retrieve_forms(htmlc);
+	if (err != NSERROR_OK) {
+		return false;
+	}
+
+	exc = dom_document_get_document_element(htmlc->document, &html);
+	if ((exc != DOM_NO_ERR) || (html == NULL)) {
+		return false;
+	}
+
+	err = html_css_new_selection_context(htmlc, &htmlc->select_ctx);
+	if (err != NSERROR_OK) {
+		dom_node_unref(html);
+		return false;
+	}
+
+	htmlc->bctx = talloc_zero(0, int);
+	if (htmlc->bctx == NULL) {
+		css_select_ctx_destroy(htmlc->select_ctx);
+		htmlc->select_ctx = NULL;
+		dom_node_unref(html);
+		return false;
+	}
+
+	NSLOG(netsurf, INFO, "Building early box tree (content %p)", htmlc);
+
+	html_get_dimensions(htmlc, &width, &height);
+
+	htmlc->early_layout = true;
+	htmlc->early_layout_stale = false;
+	htmlc->early_layout_building = true;
+	err = dom_to_box_sync(html, htmlc, html_early_layout_box_done);
+	htmlc->early_layout_building = false;
+	dom_node_unref(html);
+
+	if ((err != NSERROR_OK) ||
+	    htmlc->early_layout_stale ||
+	    (htmlc->layout == NULL) ||
+	    (htmlc->frameset != NULL)) {
+		/* framesets are not laid out */
+		html_early_layout_discard(htmlc);
+		return false;
+	}
+
+	/* the content is usually locked, as scripts run while the
+	 * document is being converted
+	 */
+	locked = c->locked;
+	c->locked = true;
+	html_reformat(c, width, height);
+	c->locked = locked;
+
+	return true;
+}
+
 
 /**
  * Destroy a CONTENT_HTML and free all resources it owns.

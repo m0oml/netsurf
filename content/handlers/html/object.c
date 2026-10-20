@@ -496,7 +496,7 @@ html_object_callback(hlcache_handle *object,
 		/* all objects have arrived */
 		content__reformat(&c->base, false, c->base.available_width,
 				c->base.available_height);
-		content_set_done(&c->base);
+		html_set_done(c);
 	} else if (nsoption_bool(incremental_reflow) &&
 		   event->type == CONTENT_MSG_DONE &&
 		   box != NULL &&
@@ -753,6 +753,12 @@ html_fetch_object(html_content *c,
 
 	/* If we've already been aborted, don't bother attempting the fetch */
 	if (c->aborted)
+		return true;
+
+	/* An early box tree is laid out without objects, as the box tree
+	 * which replaces it fetches them
+	 */
+	if (c->early_layout_building)
 		return true;
 
 	child.charset = c->encoding;

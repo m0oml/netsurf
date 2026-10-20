@@ -144,6 +144,19 @@ typedef struct html_content {
 	/** Whether the box tree is being rebuilt */
 	bool rebuilding;
 	/**
+	 * Whether the box tree is an early one, built before the document
+	 * finished loading so scripts could ask for layout information.
+	 */
+	bool early_layout;
+	/** Whether the document has changed since the early box tree */
+	bool early_layout_stale;
+	/** Whether the early box tree is being built */
+	bool early_layout_building;
+	/** Whether the forms have been retrieved from the document */
+	bool forms_retrieved;
+	/** Whether the load event has been fired */
+	bool load_fired;
+	/**
 	 * Number of operations in progress which hold box pointers while
 	 * running scripts.  The box tree is not rebuilt synchronously,
 	 * for scripts asking for layout information, while non zero.
@@ -248,7 +261,42 @@ void html__redraw_a_box(html_content *htmlc, struct box *box);
 void html_finish_conversion(html_content *htmlc);
 
 
+/**
+ * Lay out a document before it has finished loading.
+ *
+ * Scripts which run once the document has been parsed, such as deferred
+ * scripts and DOMContentLoaded handlers, can ask for layout information
+ * before the box tree is built.  An early box tree is built and laid out
+ * for them, without fetching objects.  It is replaced by the box tree
+ * built when the document has loaded.
+ *
+ * \param htmlc Content to lay out
+ * \return true if the content has a box tree which has been laid out
+ */
+bool html_early_layout(html_content *htmlc);
+
+
+/**
+ * Mark a document as done, firing its load event first.
+ *
+ * \param htmlc Content which has finished loading
+ */
+void html_set_done(html_content *htmlc);
+
+
 /* in html/rebuild.c */
+
+/**
+ * Detach a box tree from the document so it can be freed.
+ *
+ * Nodes and form controls no longer refer to the boxes, and styles
+ * libcss has cached for the nodes are discarded.
+ *
+ * \param htmlc HTML content the box tree belongs to
+ * \param layout The root of the box tree
+ */
+void html_rebuild_detach(html_content *htmlc, struct box *layout);
+
 
 /**
  * Note a change to the document which may need the box tree rebuilt.

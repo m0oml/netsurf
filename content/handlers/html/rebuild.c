@@ -186,6 +186,22 @@ static void html_rebuild_link_boxes(struct box *box)
 }
 
 
+/* exported interface documented in html/private.h */
+void html_rebuild_detach(html_content *htmlc, struct box *layout)
+{
+	dom_node *html;
+	dom_exception exc;
+
+	html_rebuild_unlink_boxes(layout);
+
+	exc = dom_document_get_document_element(htmlc->document, &html);
+	if ((exc == DOM_NO_ERR) && (html != NULL)) {
+		html_rebuild_walk_dom(html, nscss_invalidate_node_data);
+		dom_node_unref(html);
+	}
+}
+
+
 /**
  * Callback for completion of the box tree construction.
  */
@@ -459,6 +475,14 @@ static bool html_rebuild_node_matters(html_content *htmlc, dom_node *node)
 /* exported interface documented in html/private.h */
 void html_dom_changed(html_content *htmlc, dom_node *node)
 {
+	if (htmlc->early_layout) {
+		/* the early box tree is rebuilt when next needed */
+		if (htmlc->early_layout_building == false) {
+			htmlc->early_layout_stale = true;
+		}
+		return;
+	}
+
 	if (htmlc->rebuild_pending ||
 	    htmlc->rebuilding ||
 	    (htmlc->layout == NULL) ||

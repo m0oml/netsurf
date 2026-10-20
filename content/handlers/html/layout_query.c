@@ -50,6 +50,11 @@ static bool html_layout_query_prepare(html_content *htmlc)
 {
 	html_rebuild_flush(htmlc);
 
+	if (htmlc->had_initial_layout == false || htmlc->early_layout) {
+		/* scripts can ask before the document has loaded */
+		html_early_layout(htmlc);
+	}
+
 	return (htmlc->layout != NULL) && htmlc->had_initial_layout;
 }
 
