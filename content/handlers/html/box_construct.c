@@ -464,6 +464,29 @@ static inline bool box__containing_block_is_flex(
 }
 
 /**
+ * Blockify a box which is a flex item.
+ *
+ * Inline-level children of a flex container become block-level, so each
+ * is a flex item of its own.
+ *
+ * \param box  Box to blockify
+ */
+static inline void box__blockify(struct box *box)
+{
+	switch (box->type) {
+	case BOX_INLINE:
+	case BOX_INLINE_BLOCK:
+		box->type = BOX_BLOCK;
+		break;
+	case BOX_INLINE_FLEX:
+		box->type = BOX_FLEX;
+		break;
+	default:
+		break;
+	}
+}
+
+/**
  * Construct the box tree for an XML element.
  *
  * \param ctx               Tree construction context
@@ -599,19 +622,8 @@ box_construct_element(struct box_construct_ctx *ctx, bool *convert_children)
 		box->type = box_map[ns_computed_display(box->style,
 				props.node_is_root)];
 
-		if (props.containing_block->type == BOX_FLEX ||
-		    props.containing_block->type == BOX_INLINE_FLEX) {
-			/* Blockification */
-			switch (box->type) {
-			case BOX_INLINE_FLEX:
-				box->type = BOX_FLEX;
-				break;
-			case BOX_INLINE_BLOCK:
-				box->type = BOX_BLOCK;
-				break;
-			default:
-				break;
-			}
+		if (box__containing_block_is_flex(&props)) {
+			box__blockify(box);
 		}
 	}
 
@@ -620,6 +632,15 @@ box_construct_element(struct box_construct_ctx *ctx, bool *convert_children)
 				     box,
 				     convert_children) == false) {
 		return false;
+	}
+
+	/* Form controls and other special elements may have set their own
+	 * inline-level type, but they are flex items too */
+	if (props.node_is_root == false &&
+	    box__containing_block_is_flex(&props) &&
+	    css_computed_position(box->style) != CSS_POSITION_ABSOLUTE &&
+	    css_computed_position(box->style) != CSS_POSITION_FIXED) {
+		box__blockify(box);
 	}
 
 	/* Handle the :before pseudo element */
