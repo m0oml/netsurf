@@ -209,6 +209,15 @@ void form_free_control(struct form_control *control);
 
 
 /**
+ * Remove all the options of a select control.
+ *
+ * Used when the options are to be rebuilt from the document.
+ *
+ * \param control The select control
+ */
+void form_select_clear_options(struct form_control *control);
+
+/**
  * Add an option to a form select control.
  *
  * \param  control   form control of type GADGET_SELECT

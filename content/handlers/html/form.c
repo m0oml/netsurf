@@ -1467,21 +1467,7 @@ void form_free_control(struct form_control *control)
 	}
 
 	if (control->type == GADGET_SELECT) {
-		struct form_option *option, *next;
-
-		for (option = control->data.select.items; option;
-				option = next) {
-			next = option->next;
-			NSLOG(netsurf, INFO,
-			      "select option:%p text:%p value:%p", option,
-			      option->text, option->value);
-			free(option->text);
-			free(option->value);
-			free(option);
-		}
-		if (control->data.select.menu != NULL) {
-			form_free_select_menu(control);
-		}
+		form_select_clear_options(control);
 	}
 
 	if (control->type == GADGET_TEXTAREA ||
@@ -1521,7 +1507,52 @@ void form_free_control(struct form_control *control)
 		dom_string_unref(control->node_value);
 	}
 
+	/* forget the control recorded on its node */
+	if (control->node != NULL) {
+		struct form_control *recorded = NULL;
+		dom_exception exc;
+
+		exc = dom_node_get_user_data(control->node,
+				corestring_dom___ns_key_form_control_node_data,
+				(void *)&recorded);
+		if ((exc == DOM_NO_ERR) && (recorded == control)) {
+			void *old_ctl;
+			dom_node_set_user_data(control->node,
+				corestring_dom___ns_key_form_control_node_data,
+				NULL, NULL, &old_ctl);
+		}
+	}
+
 	free(control);
+}
+
+
+/* exported interface documented in html/form_internal.h */
+void form_select_clear_options(struct form_control *control)
+{
+	struct form_option *option, *next;
+
+	assert(control->type == GADGET_SELECT);
+
+	if (control->data.select.menu != NULL) {
+		form_free_select_menu(control);
+	}
+
+	for (option = control->data.select.items; option; option = next) {
+		next = option->next;
+		NSLOG(netsurf, INFO,
+		      "select option:%p text:%p value:%p", option,
+		      option->text, option->value);
+		free(option->text);
+		free(option->value);
+		free(option);
+	}
+
+	control->data.select.items = NULL;
+	control->data.select.last_item = NULL;
+	control->data.select.num_items = 0;
+	control->data.select.num_selected = 0;
+	control->data.select.current = NULL;
 }
 
 

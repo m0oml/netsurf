@@ -134,6 +134,11 @@ static void box_textarea_callback(void *data, struct textarea_msg *msg)
 	struct html_content *html = d->gadget->html;
 	struct box *box = gadget->box;
 
+	if (box == NULL && msg->type != TEXTAREA_MSG_TEXT_MODIFIED) {
+		/* The control is not displayed so only its value matters */
+		return;
+	}
+
 	switch (msg->type) {
 	case TEXTAREA_MSG_DRAG_REPORT:
 		if (msg->data.drag == TEXTAREA_DRAG_NONE) {
@@ -278,6 +283,14 @@ bool box_textarea_create_textarea(html_content *html,
 	assert(gadget->type == GADGET_TEXTAREA ||
 			gadget->type == GADGET_TEXTBOX ||
 			gadget->type == GADGET_PASSWORD);
+
+	if (gadget->data.text.ta != NULL) {
+		/* The control already has a textarea, from a previous box
+		 * tree, which is kept so its text, caret and scroll
+		 * position are not lost.  Layout sizes it for this box.
+		 */
+		return true;
+	}
 
 	if (gadget->type == GADGET_TEXTAREA) {
 		dom_html_text_area_element *textarea =

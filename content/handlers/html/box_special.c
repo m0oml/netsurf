@@ -1675,6 +1675,14 @@ box_select(dom_node *n,
 		return false;
 
 	gadget->html = content;
+
+	/* A control kept from a previous box tree has its options rebuilt
+	 * from the document, where the selection is also kept.
+	 */
+	if (gadget->data.select.items != NULL) {
+		form_select_clear_options(gadget);
+	}
+
 	err = dom_node_get_first_child(n, &c);
 	if (err != DOM_NO_ERR) {
 		form_free_control(gadget);

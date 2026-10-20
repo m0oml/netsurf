@@ -549,7 +549,16 @@ html_forms_get_control_for_node(struct form *forms, dom_node *node)
 	dom_exception err;
 	dom_string *ds_name = NULL;
 
-	/* Step one, see if we already have a control */
+	/* Step one, see if we already have a control.  Controls are
+	 * recorded on their node, which finds those outside a form too.
+	 */
+	err = dom_node_get_user_data(node,
+			corestring_dom___ns_key_form_control_node_data,
+			(void *)&ctl);
+	if ((err == DOM_NO_ERR) && (ctl != NULL)) {
+		return ctl;
+	}
+	ctl = NULL;
 	for (f = forms; f != NULL; f = f->prev) {
 		for (ctl = f->controls; ctl != NULL; ctl = ctl->next) {
 			if (ctl->node == node)
@@ -584,6 +593,16 @@ html_forms_get_control_for_node(struct form *forms, dom_node *node)
 	/* If all else fails, fake gadget time */
 	if (ctl == NULL)
 		ctl = invent_fake_gadget(node);
+
+	if (ctl != NULL) {
+		void *old_ctl;
+		err = dom_node_set_user_data(node,
+				corestring_dom___ns_key_form_control_node_data,
+				ctl, NULL, &old_ctl);
+		if (err != DOM_NO_ERR) {
+			NSLOG(netsurf, INFO, "Unable to record control on node");
+		}
+	}
 
 	if (ds_name != NULL)
 		dom_string_unref(ds_name);

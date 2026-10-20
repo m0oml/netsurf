@@ -370,6 +370,7 @@ CORESTRING_DOM_STRING(__ns_key_file_name_node_data);
 CORESTRING_DOM_STRING(__ns_key_image_coords_node_data);
 CORESTRING_DOM_STRING(__ns_key_html_content_data);
 CORESTRING_DOM_STRING(__ns_key_canvas_node_data);
+CORESTRING_DOM_STRING(__ns_key_form_control_node_data);
 
 /* unusual DOM strings */
 CORESTRING_DOM_VALUE(text_javascript, "text/javascript");
