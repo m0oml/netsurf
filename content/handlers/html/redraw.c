@@ -91,6 +91,31 @@ static bool html_redraw_box_has_background(struct box *box)
 }
 
 /**
+ * Determine if a box has box shadows to draw.
+ *
+ * Shadows are drawn for block level boxes and replaced inlines, but
+ * not for inlines which may span lines.
+ *
+ * \param box  The box to check
+ */
+static bool html_redraw_box_has_shadow(const struct box *box)
+{
+	const css_computed_shadow *shadows = NULL;
+
+	if (box->style == NULL ||
+			box->type == BOX_TEXT ||
+			box->type == BOX_BR ||
+			box->type == BOX_INLINE_END ||
+			(box->type == BOX_INLINE && box->object == NULL &&
+			 box->gadget == NULL)) {
+		return false;
+	}
+
+	return css_computed_box_shadow(box->style, &shadows) ==
+			CSS_BOX_SHADOW_SET && shadows != NULL;
+}
+
+/**
  * Find the background box for a box
  *
  * \param box  Box to find background box for
@@ -591,6 +616,205 @@ static bool html_redraw_file(int x, int y, int width, int height,
  * \param  ctx      current redraw context
  * \return true if successful, false otherwise
  */
+
+/** Most bands used to draw the blur of a box shadow */
+#define SHADOW_MAX_STEPS 8
+
+/**
+ * Blend a css colour over an opaque colour.
+ *
+ * Plotters can't blend, so shadows are drawn in colours blended with
+ * the background they are over.
+ *
+ * \param under   colour underneath
+ * \param over    css colour, with its alpha
+ * \param weight  extra weight for the alpha, 0 to 256
+ * \return the blended colour
+ */
+static colour html_redraw_blend(colour under, css_color over, int weight)
+{
+	int alpha = (((over >> 24) & 0xff) * weight) >> 8;
+	colour result = 0;
+	int shift;
+
+	for (shift = 0; shift < 24; shift += 8) {
+		/* ns colours are BGR, css colours RGB */
+		int u = (under >> shift) & 0xff;
+		int o = (over >> (16 - shift)) & 0xff;
+
+		result |= (colour) (u + ((o - u) * alpha) / 255) << shift;
+	}
+
+	return result;
+}
+
+
+/**
+ * Plot a rectangle, less a hole in it, within a clip rectangle.
+ */
+static bool html_redraw_ring(const struct rect *outer,
+		const struct rect *hole, const struct rect *clip,
+		const plot_style_t *style, const struct redraw_context *ctx)
+{
+	struct rect bands[4];
+	int n = 0;
+	int i;
+
+	if (hole->x0 >= hole->x1 || hole->y0 >= hole->y1) {
+		bands[n++] = *outer;
+	} else {
+		/* above, below, then left and right of the hole */
+		int top = min(hole->y0, outer->y1);
+		int bottom = max(hole->y1, outer->y0);
+		int mid_y0 = max(top, outer->y0);
+		int mid_y1 = min(bottom, outer->y1);
+
+		bands[n].x0 = outer->x0;
+		bands[n].y0 = outer->y0;
+		bands[n].x1 = outer->x1;
+		bands[n++].y1 = top;
+
+		bands[n].x0 = outer->x0;
+		bands[n].y0 = bottom;
+		bands[n].x1 = outer->x1;
+		bands[n++].y1 = outer->y1;
+
+		bands[n].x0 = outer->x0;
+		bands[n].y0 = mid_y0;
+		bands[n].x1 = min(hole->x0, outer->x1);
+		bands[n++].y1 = mid_y1;
+
+		bands[n].x0 = max(hole->x1, outer->x0);
+		bands[n].y0 = mid_y0;
+		bands[n].x1 = outer->x1;
+		bands[n++].y1 = mid_y1;
+	}
+
+	for (i = 0; i < n; i++) {
+		struct rect r = bands[i];
+
+		if (r.x0 < clip->x0) r.x0 = clip->x0;
+		if (r.y0 < clip->y0) r.y0 = clip->y0;
+		if (r.x1 > clip->x1) r.x1 = clip->x1;
+		if (r.y1 > clip->y1) r.y1 = clip->y1;
+		if (r.x0 >= r.x1 || r.y0 >= r.y1)
+			continue;
+
+		if (ctx->plot->rectangle(ctx, style, &r) != NSERROR_OK)
+			return false;
+	}
+
+	return true;
+}
+
+
+/**
+ * Plot the box shadows of a box.
+ *
+ * Outer shadows are drawn outside the border box, and inset shadows
+ * inside the padding box.  A blurred edge is drawn as bands which
+ * fade towards the outside of the shadow.
+ *
+ * \param style         style of the box
+ * \param unit_len_ctx  length conversion context
+ * \param area          border box for outer shadows, padding box for inset
+ * \param scale         scale for redraw
+ * \param inset         draw the inset shadows, rather than the outer ones
+ * \param under         colour the shadows are drawn over
+ * \param clip          clip rectangle
+ * \param ctx           current redraw context
+ * \return true if successful, false otherwise
+ */
+static bool html_redraw_box_shadows(const css_computed_style *style,
+		const css_unit_ctx *unit_len_ctx, const struct rect *area,
+		float scale, bool inset, colour under,
+		const struct rect *clip, const struct redraw_context *ctx)
+{
+	const css_computed_shadow *shadows = NULL;
+	const css_computed_shadow *s;
+	plot_style_t pstyle = {
+		.fill_type = PLOT_OP_TYPE_SOLID,
+	};
+	int count;
+
+	if (css_computed_box_shadow(style, &shadows) != CSS_BOX_SHADOW_SET ||
+			shadows == NULL)
+		return true;
+
+	for (count = 0; (shadows[count].flags & CSS_COMPUTED_SHADOW_END) == 0;
+			count++)
+		;
+
+	/* The first shadow is on top, so draw them last to first */
+	for (s = shadows + count - 1; s >= shadows; s--) {
+		css_color colour = 0;
+		struct rect shape;
+		int ox, oy, blur, spread, steps, k;
+
+		if (((s->flags & CSS_COMPUTED_SHADOW_INSET) != 0) != inset)
+			continue;
+
+		if (s->flags & CSS_COMPUTED_SHADOW_CURRENT_COLOR)
+			css_computed_color(style, &colour);
+		else
+			colour = s->color;
+		if ((colour >> 24) == 0)
+			continue;
+
+		ox = FIXTOINT(css_unit_len2device_px(style, unit_len_ctx,
+				s->x, s->x_unit)) * scale;
+		oy = FIXTOINT(css_unit_len2device_px(style, unit_len_ctx,
+				s->y, s->y_unit)) * scale;
+		blur = FIXTOINT(css_unit_len2device_px(style, unit_len_ctx,
+				s->blur, s->blur_unit)) * scale;
+		spread = FIXTOINT(css_unit_len2device_px(style, unit_len_ctx,
+				s->spread, s->spread_unit)) * scale;
+
+		/* The shadow's shape: grown by the spread outside the box,
+		 * or shrunk by it inside */
+		if (inset)
+			spread = -spread;
+		shape.x0 = area->x0 + ox - spread;
+		shape.y0 = area->y0 + oy - spread;
+		shape.x1 = area->x1 + ox + spread;
+		shape.y1 = area->y1 + oy + spread;
+
+		steps = min(max(blur / 2, 1), SHADOW_MAX_STEPS);
+
+		for (k = 0; k < steps; k++) {
+			/* Edge offset of this band, from half the blur
+			 * outside the shape to half inside it */
+			int e = (steps == 1) ? 0 :
+					blur / 2 - (blur * k) / (steps - 1);
+			struct rect band;
+
+			if (inset)
+				e = -e;
+			band.x0 = shape.x0 - e;
+			band.y0 = shape.y0 - e;
+			band.x1 = shape.x1 + e;
+			band.y1 = shape.y1 + e;
+
+			pstyle.fill_colour = html_redraw_blend(under, colour,
+					(256 * (k + 1)) / steps);
+
+			if (inset) {
+				/* Shadow is the area less the band */
+				if (!html_redraw_ring(area, &band, clip,
+						&pstyle, ctx))
+					return false;
+			} else {
+				/* Shadow is the band less the box */
+				if (!html_redraw_ring(&band, area, clip,
+						&pstyle, ctx))
+					return false;
+			}
+		}
+	}
+
+	return true;
+}
+
 
 /**
  * Convert a background-size dimension to pixels.
@@ -1501,6 +1725,24 @@ bool html_redraw_box(const html_content *html, struct box *box,
 		return false;
 	}
 
+	/* outer box shadows, which are outside the box so are drawn
+	 * before clipping to it */
+	if (html_redraw_box_has_shadow(box)) {
+		struct rect border_box = {
+			.x0 = x - border_left,
+			.y0 = y - border_top,
+			.x1 = x + padding_width + border_right,
+			.y1 = y + padding_height + border_bottom,
+		};
+
+		if (ctx->plot->clip(ctx, clip) != NSERROR_OK)
+			return false;
+		if (!html_redraw_box_shadows(box->style, &html->unit_len_ctx,
+				&border_box, scale, false,
+				current_background_color, clip, ctx))
+			return false;
+	}
+
 	if (box->style != NULL &&
 			css_computed_position(box->style) ==
 					CSS_POSITION_ABSOLUTE &&
@@ -1620,6 +1862,21 @@ bool html_redraw_box(const html_content *html, struct box *box,
 			if (ctx->plot->clip(ctx, &r) != NSERROR_OK)
 				return false;
 		}
+	}
+
+	/* inset box shadows, over the background and under the border */
+	if (html_redraw_box_has_shadow(box)) {
+		struct rect padding_box = {
+			.x0 = x,
+			.y0 = y,
+			.x1 = x + padding_width,
+			.y1 = y + padding_height,
+		};
+
+		if (!html_redraw_box_shadows(box->style, &html->unit_len_ctx,
+				&padding_box, scale, true,
+				current_background_color, &r, ctx))
+			return false;
 	}
 
 	/* borders for block level content and replaced inlines */

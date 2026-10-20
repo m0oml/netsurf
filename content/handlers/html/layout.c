@@ -5215,6 +5215,44 @@ layout_get_box_bbox(
 	*desc_y1 = box->padding[TOP] + box->height + box->padding[BOTTOM] +
 			box->border[BOTTOM].width;
 
+	/* Outer box shadows are drawn outside the border box */
+	if (box->style != NULL) {
+		const css_computed_shadow *s = NULL;
+
+		if (css_computed_box_shadow(box->style, &s) !=
+				CSS_BOX_SHADOW_SET) {
+			s = NULL;
+		}
+		for (; s != NULL && !(s->flags & CSS_COMPUTED_SHADOW_END);
+				s++) {
+			int ox, oy, reach;
+
+			if (s->flags & CSS_COMPUTED_SHADOW_INSET)
+				continue;
+
+			ox = FIXTOINT(css_unit_len2device_px(box->style,
+					unit_len_ctx, s->x, s->x_unit));
+			oy = FIXTOINT(css_unit_len2device_px(box->style,
+					unit_len_ctx, s->y, s->y_unit));
+			reach = FIXTOINT(css_unit_len2device_px(box->style,
+					unit_len_ctx, s->blur, s->blur_unit)) +
+				FIXTOINT(css_unit_len2device_px(box->style,
+					unit_len_ctx, s->spread,
+					s->spread_unit));
+
+			*desc_x0 = min(*desc_x0,
+					-box->border[LEFT].width + ox - reach);
+			*desc_y0 = min(*desc_y0,
+					-box->border[TOP].width + oy - reach);
+			*desc_x1 = max(*desc_x1, box->padding[LEFT] +
+					box->width + box->padding[RIGHT] +
+					box->border[RIGHT].width + ox + reach);
+			*desc_y1 = max(*desc_y1, box->padding[TOP] +
+					box->height + box->padding[BOTTOM] +
+					box->border[BOTTOM].width + oy + reach);
+		}
+	}
+
 	/* To stop the top of text getting clipped when css line-height is
 	 * reduced, we increase the top of the descendant bbox. */
 	if (box->type == BOX_BLOCK && box->style != NULL &&
