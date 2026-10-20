@@ -2709,6 +2709,31 @@ static int line_height(
 
 
 /**
+ * Check if a box is to be put on a line which is filled up to x.
+ *
+ * Boxes are put on the line until one goes over its end, but the end of
+ * an inline, which takes up no room, stays with what it ends.
+ *
+ * \param b      the box, or NULL if there are no more
+ * \param x      how far along the line the boxes before reach
+ * \param avail  width of the line
+ * \return true if the box is put on the line
+ */
+static inline bool layout_line_box_fits(const struct box *b, int x, int avail)
+{
+	if (b == NULL) {
+		return false;
+	}
+
+	return (x <= avail) ||
+			(b->type == BOX_INLINE_END &&
+			 b->padding[RIGHT] == 0 &&
+			 b->border[RIGHT].width == 0 &&
+			 b->margin[RIGHT] == 0);
+}
+
+
+/**
  * Position a line of boxes in inline formatting context.
  *
  * \param  first   box at start of line
@@ -2797,7 +2822,8 @@ layout_line(struct box *first,
 	NSLOG(layout, DEBUG,  "x0 %i, x1 %i, x1 - x0 %i", x0, x1, x1 - x0);
 
 
-	for (x = 0, b = first; x <= x1 - x0 && b != 0; b = b->next) {
+	for (x = 0, b = first; layout_line_box_fits(b, x, x1 - x0);
+	     b = b->next) {
 		int min_width, max_width, min_height, max_height;
 
 		assert(lh__box_is_inline_content(b));
@@ -3023,7 +3049,9 @@ layout_line(struct box *first,
 
 	NSLOG(layout, DEBUG,  "x0 %i, x1 %i, x1 - x0 %i", x0, x1, x1 - x0);
 
-	for (x = x_previous = 0, b = first; x <= x1 - x0 && b; b = b->next) {
+	for (x = x_previous = 0, b = first;
+	     layout_line_box_fits(b, x, x1 - x0);
+	     b = b->next) {
 
 		NSLOG(layout, DEBUG,  "pass 2: b %p, x %i", b, x);
 
@@ -3080,7 +3108,16 @@ layout_line(struct box *first,
 			}
 			split_box = b;
 			move_y = true;
-			inline_count++;
+
+			/* An inline's start and end take up no room when it
+			 * has no text or object and no padding, border or
+			 * margin, so they are not a box which another could
+			 * not be forced in ahead of. */
+			if (!((b->type == BOX_INLINE_END ||
+			       (b->type == BOX_INLINE && b->inline_end != NULL &&
+				b->text == NULL && b->object == NULL)) &&
+			      x == x_previous))
+				inline_count++;
 		} else if (b->type == BOX_BR) {
 			b->x = x;
 			b->width = 0;
