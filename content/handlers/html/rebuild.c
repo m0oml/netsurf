@@ -482,7 +482,7 @@ void html_dom_changed(html_content *htmlc, dom_node *node)
 /* exported interface documented in html/private.h */
 void html_rebuild_flush(html_content *htmlc)
 {
-	if (htmlc->rebuild_pending) {
+	if (htmlc->rebuild_pending && (htmlc->box_pins == 0)) {
 		guit->misc->schedule(-1, html_rebuild_box_tree_cb, htmlc);
 		html_rebuild_box_tree_cb(htmlc);
 	}

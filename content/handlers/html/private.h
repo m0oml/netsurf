@@ -142,6 +142,12 @@ typedef struct html_content {
 	bool rebuild_pending;
 	/** Whether the box tree is being rebuilt */
 	bool rebuilding;
+	/**
+	 * Number of operations in progress which hold box pointers while
+	 * running scripts.  The box tree is not rebuilt synchronously,
+	 * for scripts asking for layout information, while non zero.
+	 */
+	unsigned int box_pins;
 	/** Document background colour. */
 	colour background_colour;
 

@@ -1468,12 +1468,16 @@ nserror html_mouse_track(struct content *c,
 }
 
 
-/* exported interface documented in html/interaction.h */
-nserror
-html_mouse_action(struct content *c,
-		  struct browser_window *bw,
-		  browser_mouse_state mouse,
-		  int x, int y)
+/**
+ * Handle mouse clicks and movements in an HTML content window.
+ *
+ * \see html_mouse_action()
+ */
+static nserror
+html__mouse_action(struct content *c,
+		   struct browser_window *bw,
+		   browser_mouse_state mouse,
+		   int x, int y)
 {
 	html_content *html = (html_content *)c;
 	nserror res = NSERROR_OK;
@@ -1527,7 +1531,7 @@ html_mouse_action(struct content *c,
  * \param  key	The UCS4 character codepoint
  * \return true if key handled, false otherwise
  */
-bool html_keypress(struct content *c, uint32_t key)
+static bool html__keypress(struct content *c, uint32_t key)
 {
 	html_content *html = (html_content *) c;
 	struct selection *sel = html->sel;
@@ -1824,4 +1828,42 @@ void html_set_selection(html_content *html, html_selection_type selection_type,
 	/* Inform of the content's selection status change */
 	content_broadcast((struct content *)html, CONTENT_MSG_SELECTION,
 			&msg_data);
+}
+
+
+/* exported interface documented in html/interaction.h */
+nserror
+html_mouse_action(struct content *c,
+		  struct browser_window *bw,
+		  browser_mouse_state mouse,
+		  int x, int y)
+{
+	html_content *html = (html_content *)c;
+	nserror res;
+
+	/* Mouse handling holds box pointers across running scripts, for
+	 * click events, so the box tree must not be rebuilt meanwhile.
+	 */
+	html->box_pins++;
+	res = html__mouse_action(c, bw, mouse, x, y);
+	html->box_pins--;
+
+	return res;
+}
+
+
+/* exported interface documented in html/interaction.h */
+bool html_keypress(struct content *c, uint32_t key)
+{
+	html_content *html = (html_content *)c;
+	bool res;
+
+	/* Key handling may change form controls, whose changes to the
+	 * document may run scripts, while holding box pointers.
+	 */
+	html->box_pins++;
+	res = html__keypress(c, key);
+	html->box_pins--;
+
+	return res;
 }
