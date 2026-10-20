@@ -271,6 +271,26 @@ const char* browser_window_get_title(struct browser_window *bw);
 struct history * browser_window_get_history(struct browser_window *bw);
 
 /**
+ * Get a browser window's scroll offsets.
+ *
+ * \param bw  browser window
+ * \param x   updated to the horizontal scroll offset in unscaled px
+ * \param y   updated to the vertical scroll offset in unscaled px
+ * \return NSERROR_OK, or appropriate error otherwise.
+ */
+nserror browser_window_get_scroll(struct browser_window *bw, int *x, int *y);
+
+/**
+ * Scroll a browser window to show a position at its top left.
+ *
+ * \param bw  browser window
+ * \param x   horizontal position in the content in unscaled px
+ * \param y   vertical position in the content in unscaled px
+ * \return NSERROR_OK, or appropriate error otherwise.
+ */
+nserror browser_window_scroll_to(struct browser_window *bw, int x, int y);
+
+/**
  * Get a browser window's content extents.
  *
  * \param bw	  browser window

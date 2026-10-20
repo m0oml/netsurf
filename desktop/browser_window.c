@@ -3975,6 +3975,44 @@ struct hlcache_handle *browser_window_get_content(struct browser_window *bw)
 
 
 /* Exported interface, documented in netsurf/browser_window.h */
+nserror browser_window_get_scroll(struct browser_window *bw, int *x, int *y)
+{
+	int sx = 0;
+	int sy = 0;
+
+	if (bw->window != NULL) {
+		/* Front end window */
+		if (!guit->window->get_scroll(bw->window, &sx, &sy)) {
+			return NSERROR_BAD_PARAMETER;
+		}
+		sx = sx / bw->scale;
+		sy = sy / bw->scale;
+	} else {
+		/* Core managed browser window */
+		sx = scrollbar_get_offset(bw->scroll_x);
+		sy = scrollbar_get_offset(bw->scroll_y);
+	}
+
+	*x = sx;
+	*y = sy;
+
+	return NSERROR_OK;
+}
+
+
+/* Exported interface, documented in netsurf/browser_window.h */
+nserror browser_window_scroll_to(struct browser_window *bw, int x, int y)
+{
+	struct rect rect;
+
+	rect.x0 = rect.x1 = x;
+	rect.y0 = rect.y1 = y;
+
+	return browser_window_set_scroll(bw, &rect);
+}
+
+
+/* Exported interface, documented in netsurf/browser_window.h */
 nserror browser_window_get_extents(struct browser_window *bw, bool scaled,
 				   int *width, int *height)
 {
