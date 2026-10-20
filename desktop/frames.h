@@ -51,6 +51,17 @@ void browser_window_recalculate_iframes(struct browser_window *bw);
 nserror browser_window_invalidate_iframe(struct browser_window *bw);
 
 /**
+ * Rebind iframes to the boxes of a rebuilt box tree.
+ *
+ * Must be called after the new box tree is built and before the old one
+ * is freed.  Iframes whose element no longer has a box are unbound and
+ * not displayed.
+ *
+ * \param bw The browser window whose content's box tree was rebuilt
+ */
+void browser_window_rebind_iframes(struct browser_window *bw);
+
+/**
  * Destroy iframes opened in browser_window_create_iframes()
  *
  * \param bw The browser window to destroy iframes for.

@@ -36,6 +36,7 @@
 #include "html/html.h"
 #include "html/box.h"
 #include "html/box_inspect.h"
+#include "html/box_construct.h"
 
 #include "desktop/browser_private.h"
 #include "desktop/frames.h"
@@ -60,7 +61,10 @@ void browser_window_scroll_callback(void *client_data,
 	switch(scrollbar_data->msg) {
 	case SCROLLBAR_MSG_MOVED:
 		if (bw->browser_window_type == BROWSER_WINDOW_IFRAME) {
-			html_redraw_a_box(bw->parent->current_content, bw->box);
+			if (bw->box != NULL) {
+				html_redraw_a_box(bw->parent->current_content,
+						  bw->box);
+			}
 		} else {
 			struct rect rect;
 
@@ -184,8 +188,33 @@ void browser_window_handle_scrollbars(struct browser_window *bw)
 /* exported function documented in desktop/frames.h */
 nserror browser_window_invalidate_iframe(struct browser_window *bw)
 {
-	html_redraw_a_box(bw->parent->current_content, bw->box);
+	if (bw->box != NULL) {
+		html_redraw_a_box(bw->parent->current_content, bw->box);
+	}
 	return NSERROR_OK;
+}
+
+
+/* exported function documented in desktop/frames.h */
+void browser_window_rebind_iframes(struct browser_window *bw)
+{
+	int i;
+
+	for (i = 0; i < bw->iframe_count; i++) {
+		struct browser_window *window = &bw->iframes[i];
+		struct box *box;
+
+		if (window->box == NULL) {
+			continue;
+		}
+
+		/* the old box is still valid, find the new box for its node */
+		box = box_for_node(window->box->node);
+		window->box = box;
+		if (box != NULL) {
+			box->iframe = window;
+		}
+	}
 }
 
 /* exported function documented in desktop/frames.h */

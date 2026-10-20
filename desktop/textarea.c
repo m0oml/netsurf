@@ -2128,6 +2128,18 @@ bool textarea_set_caret(struct textarea *ta, int caret)
 
 
 /* exported interface, documented in textarea.h */
+void textarea_refresh_caret(struct textarea *ta)
+{
+	if (ta->caret_pos.byte_off < 0) {
+		/* the caret is hidden, there is nothing to report */
+		return;
+	}
+
+	textarea_set_caret_internal(ta, textarea_get_caret(ta));
+}
+
+
+/* exported interface, documented in textarea.h */
 void textarea_redraw(struct textarea *ta, int x, int y, colour bg, float scale,
 		const struct rect *clip, const struct redraw_context *ctx)
 {

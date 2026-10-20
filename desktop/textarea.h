@@ -234,6 +234,18 @@ bool textarea_set_caret(struct textarea *ta, int caret);
 
 
 /**
+ * Report the caret position to the client again.
+ *
+ * Used when the client has lost track of the caret, such as when the
+ * textarea has been moved to a new owner.  Does nothing if the caret is
+ * hidden.
+ *
+ * \param ta	Text area
+ */
+void textarea_refresh_caret(struct textarea *ta);
+
+
+/**
  * Handle redraw requests for text areas
  *
  * \param ta	textarea to render
