@@ -281,6 +281,54 @@ void html_rebuild_flush(html_content *htmlc);
 void html_rebuild_cancel(html_content *htmlc);
 
 
+/* in html/layout_query.c */
+
+/**
+ * Position and size of an element, in css px.
+ */
+struct html_layout_geometry {
+	int x; /**< left of the border box in the document */
+	int y; /**< top of the border box in the document */
+	int width; /**< width of the border box */
+	int height; /**< height of the border box */
+	int client_width; /**< width of the padding box */
+	int client_height; /**< height of the padding box */
+	int scroll_width; /**< width of the content and its overflow */
+	int scroll_height; /**< height of the content and its overflow */
+};
+
+/**
+ * Get the position and size of an element.
+ *
+ * \param htmlc HTML content the element belongs to
+ * \param node The element
+ * \param geometry Updated with the element's geometry
+ * \return true on success, false if the element is not displayed
+ */
+bool html_layout_node_geometry(html_content *htmlc, struct dom_node *node, struct html_layout_geometry *geometry);
+
+/**
+ * Get the size and scroll position of the viewport, in css px.
+ *
+ * Before the content has been laid out the size is that of the
+ * browser window and the scroll position is zero.
+ */
+void html_layout_viewport(html_content *htmlc, int *width, int *height, int *scroll_x, int *scroll_y);
+
+/**
+ * Get the computed value of a css property of an element.
+ *
+ * Only commonly used properties are supported.  Sizes, margins,
+ * padding and borders are used values from the layout.
+ *
+ * \param htmlc HTML content the element belongs to
+ * \param node The element
+ * \param property The css property name
+ * \return The value, which the caller must free, or NULL if unknown
+ */
+char *html_layout_computed_style(html_content *htmlc, struct dom_node *node, const char *property);
+
+
 /**
  * Test if an HTML content conversion can begin
  *
