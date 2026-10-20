@@ -947,6 +947,23 @@ static void layout_minmax_block(
 			max = html_get_box_tree(block->object)->max_width;
 		} else {
 			min = max = content_get_width(block->object);
+
+			if (wtype != CSS_WIDTH_SET &&
+			    htype == CSS_HEIGHT_SET &&
+			    hunit != CSS_UNIT_PCT &&
+			    content_get_height(block->object) > 0) {
+				/* only the height is given, so the width
+				 * follows from the ratio of the object */
+				int h = FIXTOINT(css_unit_len2device_px(
+						block->style,
+						&content->unit_len_ctx,
+						height, hunit));
+
+				min = max = (h * content_get_width(
+							block->object)) /
+						content_get_height(
+							block->object);
+			}
 		}
 
 		block->flags |= HAS_HEIGHT;
@@ -1029,8 +1046,12 @@ static void layout_minmax_block(
 		assert(0);
 	}
 
-	/* fixed width takes priority */
-	if (block->type != BOX_TABLE_CELL && !lh__box_is_flex_item(block)) {
+	/* fixed width takes priority.  A flex item decides its size when it
+	 * is laid out, but an object has no size of its own to shrink to, so
+	 * its width is the one given. */
+	if (block->type != BOX_TABLE_CELL &&
+	    (!lh__box_is_flex_item(block) ||
+	     block->object != NULL || (block->flags & IS_REPLACED))) {
 		bool border_box = bs == CSS_BOX_SIZING_BORDER_BOX;
 		enum css_max_width_e max_type;
 		enum css_min_width_e min_type;
