@@ -518,6 +518,8 @@ ro_plot_path(const struct redraw_context *ctx,
 	unsigned int i;
 	os_trfm trfm;
 	os_error *error;
+	float scale;
+	float thickness;
 
 	if (n == 0) {
 		return NSERROR_OK;
@@ -602,9 +604,20 @@ ro_plot_path(const struct redraw_context *ctx,
 			goto error;
 		}
 
+		/* The Draw module scales the line thickness by the transform
+		 * as well as the path, but the plotter is asked for a
+		 * thickness in the output, so divide the scaling out.
+		 */
+		scale = sqrtf(fabsf(transform[0] * transform[3] -
+				    transform[1] * transform[2]));
+		if (scale <= 0) {
+			scale = 1;
+		}
+		thickness = plot_style_fixed_to_float(pstyle->stroke_width) *
+				2 * 256 / scale;
+
 		error = xdraw_stroke((draw_path *) path, 0, &trfm, 0,
-				plot_style_fixed_to_int(
-						pstyle->stroke_width) * 2 * 256,
+				(int) thickness,
 				&line_style, 0);
 		if (error) {
 			NSLOG(netsurf, INFO, "xdraw_stroke: 0x%x: %s",
