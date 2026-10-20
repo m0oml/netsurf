@@ -19,3 +19,6 @@ endif
 
 # Fetcher for javascript scheme is always required
 S_JAVASCRIPT += fetcher.c
+
+# Network requests made by scripts
+S_JAVASCRIPT += script_fetch.c
