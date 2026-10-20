@@ -3872,6 +3872,15 @@ bool layout_block_context(
 			layout_block_add_scrollbar(box, BOTTOM);
 		}
 
+		/* Apply any min-height and max-height to childless blocks in
+		 * normal flow, as is done below for blocks with children */
+		if (box->type == BOX_BLOCK && !box->object && box->style &&
+				css_computed_position(box->style) !=
+						CSS_POSITION_ABSOLUTE) {
+			layout_apply_minmax_height(&content->unit_len_ctx,
+					box, NULL);
+		}
+
 		cy += box->height + box->padding[BOTTOM] +
 				box->border[BOTTOM].width;
 		cx -= box->x;
