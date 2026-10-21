@@ -81,6 +81,7 @@ static css_error node_is_focus(void *pw, void *node, bool *match);
 static css_error node_is_enabled(void *pw, void *node, bool *match);
 static css_error node_is_disabled(void *pw, void *node, bool *match);
 static css_error node_is_checked(void *pw, void *node, bool *match);
+static css_error node_is_placeholder_shown(void *pw, void *node, bool *match);
 static css_error node_is_target(void *pw, void *node, bool *match);
 static css_error node_is_lang(void *pw, void *node,
 		lwc_string *lang, bool *match);
@@ -133,6 +134,7 @@ static css_select_handler selection_handler = {
 	ua_default_for_property,
 	set_libcss_node_data,
 	get_libcss_node_data,
+	node_is_placeholder_shown,
 };
 
 /**
@@ -1657,6 +1659,65 @@ css_error node_is_checked(void *pw, void *node, bool *match)
 	/** \todo Support checked nodes */
 
 	*match = false;
+
+	return CSS_OK;
+}
+
+/**
+ * Callback to determine if a node is showing its placeholder text.
+ *
+ * An input or textarea with a non-empty placeholder attribute and an
+ * empty value.
+ *
+ * \param pw     HTML document
+ * \param node   DOM node
+ * \param match  Pointer to location to receive result
+ * \return CSS_OK.
+ *
+ * \post \a match will contain true if the node is showing its placeholder.
+ */
+css_error node_is_placeholder_shown(void *pw, void *node, bool *match)
+{
+	dom_node *n = node;
+	dom_string *name = NULL;
+	dom_string *attr = NULL;
+	dom_exception err;
+	bool is_input = false;
+	bool is_textarea = false;
+	bool empty;
+
+	*match = false;
+
+	err = dom_node_get_node_name(n, &name);
+	if (err != DOM_NO_ERR || name == NULL)
+		return CSS_OK;
+	is_input = strcasecmp(dom_string_data(name), "input") == 0;
+	is_textarea = strcasecmp(dom_string_data(name), "textarea") == 0;
+	dom_string_unref(name);
+	if (is_input == false && is_textarea == false)
+		return CSS_OK;
+
+	err = dom_element_get_attribute(n, corestring_dom_placeholder, &attr);
+	if (err != DOM_NO_ERR || attr == NULL)
+		return CSS_OK;
+	empty = (dom_string_length(attr) == 0);
+	dom_string_unref(attr);
+	if (empty)
+		return CSS_OK;
+
+	if (is_input) {
+		err = dom_element_get_attribute(n, corestring_dom_value,
+				&attr);
+		if (err != DOM_NO_ERR)
+			return CSS_OK;
+	} else {
+		err = dom_node_get_text_content(n, &attr);
+		if (err != DOM_NO_ERR)
+			return CSS_OK;
+	}
+	*match = (attr == NULL || dom_string_length(attr) == 0);
+	if (attr != NULL)
+		dom_string_unref(attr);
 
 	return CSS_OK;
 }
