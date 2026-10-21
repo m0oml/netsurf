@@ -1136,6 +1136,9 @@ static void html_reformat(struct content *c, int width, int height)
 	/* calculate next reflow time at three times what it took to reflow */
 	nsu_getmonotonic_ms(&ms_after);
 
+	NSLOG(netsurf, INFO, "Layout took %u ms at width %d (content %p)",
+	      (unsigned int)(ms_after - ms_before), width, htmlc);
+
 	ms_interval = (ms_after - ms_before) * 3;
 	if (ms_interval < (nsoption_uint(min_reflow_period) * 10)) {
 		ms_interval = nsoption_uint(min_reflow_period) * 10;
@@ -1305,6 +1308,9 @@ bool html_early_layout(html_content *htmlc)
 	dom_node *html;
 	bool locked;
 	nserror err;
+	uint64_t ms_start;
+	uint64_t ms_built;
+	uint64_t ms_end;
 
 	if (htmlc->early_layout) {
 		if (htmlc->early_layout_stale == false) {
@@ -1351,6 +1357,7 @@ bool html_early_layout(html_content *htmlc)
 	}
 
 	NSLOG(netsurf, INFO, "Building early box tree (content %p)", htmlc);
+	nsu_getmonotonic_ms(&ms_start);
 
 	html_get_dimensions(htmlc, &width, &height);
 
@@ -1370,6 +1377,8 @@ bool html_early_layout(html_content *htmlc)
 		return false;
 	}
 
+	nsu_getmonotonic_ms(&ms_built);
+
 	/* the content is usually locked, as scripts run while the
 	 * document is being converted
 	 */
@@ -1377,6 +1386,12 @@ bool html_early_layout(html_content *htmlc)
 	c->locked = true;
 	html_reformat(c, width, height);
 	c->locked = locked;
+
+	nsu_getmonotonic_ms(&ms_end);
+	NSLOG(netsurf, INFO, "Early layout took %u ms: styles and boxes %u, layout %u (content %p)",
+	      (unsigned int)(ms_end - ms_start),
+	      (unsigned int)(ms_built - ms_start),
+	      (unsigned int)(ms_end - ms_built), htmlc);
 
 	return true;
 }

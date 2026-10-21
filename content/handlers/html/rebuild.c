@@ -273,6 +273,9 @@ static nserror html_rebuild_box_tree(html_content *htmlc)
 	unsigned int old_num_objects;
 	uint64_t ms_start;
 	uint64_t ms_end;
+	uint64_t ms_invalidated;
+	uint64_t ms_built;
+	uint64_t ms_freed;
 	struct box *old_layout;
 	struct form_control *focus;
 	int *old_bctx;
@@ -327,6 +330,8 @@ static nserror html_rebuild_box_tree(html_content *htmlc)
 	/* The document may have changed in ways libcss has cached */
 	html_rebuild_walk_dom(html, nscss_invalidate_node_data);
 
+	nsu_getmonotonic_ms(&ms_invalidated);
+
 	html_rebuild_success = false;
 	err = dom_to_box_sync(html, htmlc, html_rebuild_box_done);
 	if ((err != NSERROR_OK) || (html_rebuild_success == false)) {
@@ -352,6 +357,8 @@ static nserror html_rebuild_box_tree(html_content *htmlc)
 		return (err != NSERROR_OK) ? err : NSERROR_BOX_CONVERT;
 	}
 
+	nsu_getmonotonic_ms(&ms_built);
+
 	/* Move iframes to their new boxes while the old ones are valid */
 	if (htmlc->bw != NULL) {
 		browser_window_rebind_iframes(htmlc->bw);
@@ -374,6 +381,8 @@ static nserror html_rebuild_box_tree(html_content *htmlc)
 	htmlc->rebuilding = false;
 	dom_node_unref(html);
 
+	nsu_getmonotonic_ms(&ms_freed);
+
 	/* Lay out the new tree, which redraws it */
 	if (htmlc->had_initial_layout) {
 		content__reformat(c, false, c->available_width,
@@ -381,8 +390,12 @@ static nserror html_rebuild_box_tree(html_content *htmlc)
 	}
 
 	nsu_getmonotonic_ms(&ms_end);
-	NSLOG(netsurf, INFO, "Rebuilt and laid out box tree in %u ms (content %p)",
-	      (unsigned int)(ms_end - ms_start), htmlc);
+	NSLOG(netsurf, INFO, "Rebuilt and laid out box tree in %u ms (content %p): invalidate %u, styles and boxes %u, free and imagemaps %u, layout %u",
+	      (unsigned int)(ms_end - ms_start), htmlc,
+	      (unsigned int)(ms_invalidated - ms_start),
+	      (unsigned int)(ms_built - ms_invalidated),
+	      (unsigned int)(ms_freed - ms_built),
+	      (unsigned int)(ms_end - ms_freed));
 
 	/* Give the focus back to a textarea which is still displayed */
 	if ((focus != NULL) &&
