@@ -16,3 +16,21 @@ getter HTMLButtonElement::name();
 setter HTMLButtonElement::name();
 getter HTMLButtonElement::value();
 setter HTMLButtonElement::value();
+
+getter HTMLButtonElement::form()
+%{
+	dom_exception exc;
+	struct dom_html_form_element *form = NULL;
+
+	exc = dom_html_button_element_get_form((struct dom_html_button_element *)((node_private_t*)priv)->node, &form);
+	if (exc != DOM_NO_ERR) {
+		return 0;
+	}
+
+	dukky_push_node(ctx, (struct dom_node *)form);
+	if (form != NULL) {
+		dom_node_unref(form);
+	}
+
+	return 1;
+%}

@@ -24,3 +24,86 @@ getter HTMLSelectElement::type();
 getter HTMLSelectElement::value();
 setter HTMLSelectElement::value();
 
+
+getter HTMLSelectElement::form()
+%{
+	dom_exception exc;
+	struct dom_html_form_element *form = NULL;
+
+	exc = dom_html_select_element_get_form((struct dom_html_select_element *)((node_private_t*)priv)->node, &form);
+	if (exc != DOM_NO_ERR) {
+		return 0;
+	}
+
+	dukky_push_node(ctx, (struct dom_node *)form);
+	if (form != NULL) {
+		dom_node_unref(form);
+	}
+
+	return 1;
+%}
+
+getter HTMLSelectElement::selectedIndex()
+%{
+	dom_exception exc;
+	int32_t index;
+
+	exc = dom_html_select_element_get_selected_index((struct dom_html_select_element *)((node_private_t*)priv)->node, &index);
+	if (exc != DOM_NO_ERR) {
+		return 0;
+	}
+
+	if (index < 0) {
+		/* a single selection list always shows its first option */
+		bool multiple = false;
+		dom_html_options_collection *options = NULL;
+		uint32_t count = 0;
+
+		dom_html_select_element_get_multiple((struct dom_html_select_element *)((node_private_t*)priv)->node, &multiple);
+		if (multiple == false &&
+		    dom_html_select_element_get_options((struct dom_html_select_element *)((node_private_t*)priv)->node, &options) == DOM_NO_ERR &&
+		    options != NULL) {
+			dom_html_options_collection_get_length(options, &count);
+			dom_html_options_collection_unref(options);
+			if (count > 0) {
+				index = 0;
+			}
+		}
+	}
+
+	duk_push_int(ctx, index);
+
+	return 1;
+%}
+
+setter HTMLSelectElement::selectedIndex()
+%{
+	struct dom_html_select_element *select = (struct dom_html_select_element *)((node_private_t*)priv)->node;
+	dom_html_options_collection *options = NULL;
+	uint32_t count = 0;
+	uint32_t i;
+	int32_t index = duk_get_int(ctx, 0);
+
+	if (dom_html_select_element_get_options(select, &options) != DOM_NO_ERR ||
+	    options == NULL) {
+		return 0;
+	}
+	dom_html_options_collection_get_length(options, &count);
+
+	/* selecting one option deselects the rest; an index which is out of
+	 * range deselects everything */
+	for (i = 0; i < count; i++) {
+		dom_node *option = NULL;
+
+		if (dom_html_options_collection_item(options, i, &option) != DOM_NO_ERR ||
+		    option == NULL) {
+			continue;
+		}
+		dom_html_option_element_set_selected((dom_html_option_element *)option,
+				index >= 0 && i == (uint32_t)index);
+		dom_node_unref(option);
+	}
+	dom_html_options_collection_unref(options);
+
+	return 0;
+%}
