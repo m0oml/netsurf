@@ -4378,4 +4378,145 @@
   defineGlobal("XMLHttpRequestEventTarget", XMLHttpRequestEventTarget);
   defineGlobal("XMLHttpRequestUpload", XMLHttpRequestUpload);
   defineGlobal("XMLHttpRequest", XMLHttpRequest);
+
+  /* URL attributes
+   *
+   * The properties which reflect a URL attribute return the URL resolved
+   * against the document base, which the bindings give as written.
+   */
+  const resolveUrl = (node, value) => {
+    if (value === null || value === undefined || value === "") {
+      return "";
+    }
+    try {
+      return new URL(String(value), node.baseURI).href;
+    } catch (e) {
+      return String(value);
+    }
+  };
+
+  const reflectUrl = (interfaceName, prop, attr) => {
+    const ctor = global[interfaceName];
+    if (typeof ctor !== "function" || !ctor.prototype) {
+      return;
+    }
+    Object.defineProperty(ctor.prototype, prop, {
+      get() { return resolveUrl(this, this.getAttribute(attr)); },
+      set(value) { this.setAttribute(attr, String(value)); },
+      enumerable: true,
+      configurable: true
+    });
+  };
+
+  for (const [name, prop, attr] of [
+    ["HTMLAnchorElement", "href", "href"],
+    ["HTMLAreaElement", "href", "href"],
+    ["HTMLLinkElement", "href", "href"],
+    ["HTMLImageElement", "src", "src"],
+    ["HTMLScriptElement", "src", "src"],
+    ["HTMLIFrameElement", "src", "src"],
+    ["HTMLFrameElement", "src", "src"],
+    ["HTMLEmbedElement", "src", "src"],
+    ["HTMLSourceElement", "src", "src"],
+    ["HTMLTrackElement", "src", "src"],
+    ["HTMLMediaElement", "src", "src"],
+    ["HTMLVideoElement", "poster", "poster"],
+    ["HTMLInputElement", "src", "src"],
+    ["HTMLFormElement", "action", "action"],
+    ["HTMLObjectElement", "data", "data"]
+  ]) {
+    reflectUrl(name, prop, attr);
+  }
+
+  /* The parts of the URL of an anchor or area */
+  for (const name of ["HTMLAnchorElement", "HTMLAreaElement"]) {
+    const ctor = global[name];
+    if (typeof ctor !== "function" || !ctor.prototype) {
+      continue;
+    }
+    const parsed = (el) => {
+      try {
+        return new URL(el.href);
+      } catch (e) {
+        return null;
+      }
+    };
+    for (const part of ["origin", "protocol", "host", "hostname", "port", "pathname", "search", "hash", "username", "password"]) {
+      Object.defineProperty(ctor.prototype, part, {
+        get() {
+          const u = parsed(this);
+          return u ? u[part] : "";
+        },
+        set(value) {
+          const u = parsed(this);
+          if (u && part !== "origin") {
+            u[part] = value;
+            this.setAttribute("href", u.href);
+          }
+        },
+        enumerable: true,
+        configurable: true
+      });
+    }
+    Object.defineProperty(ctor.prototype, "toString", {
+      value() { return this.href; },
+      writable: true,
+      configurable: true
+    });
+  }
+
+  /* Console
+   *
+   * Code takes methods off the console and calls them unbound.
+   */
+  {
+    const target = global.console;
+    const seen = new Set();
+    for (let o = target; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+      for (const key of Object.getOwnPropertyNames(o)) {
+        if (key === "constructor" || seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        const descriptor = Object.getOwnPropertyDescriptor(o, key);
+        if (descriptor && typeof descriptor.value === "function") {
+          Object.defineProperty(target, key, {
+            value: descriptor.value.bind(target),
+            writable: true,
+            enumerable: true,
+            configurable: true
+          });
+        }
+      }
+    }
+  }
+
+  /* PerformanceObserver */
+
+  /** \todo report performance entries */
+  class PerformanceObserver {
+    #callback;
+
+    constructor(callback) {
+      if (typeof callback !== "function") {
+        throw new TypeError("PerformanceObserver: callback is not a function");
+      }
+      this.#callback = callback;
+    }
+
+    observe(options) {
+      if (options === null || typeof options !== "object") {
+        throw new TypeError("PerformanceObserver: options is not an object");
+      }
+    }
+
+    disconnect() {}
+
+    takeRecords() { return []; }
+
+    static get supportedEntryTypes() { return []; }
+
+    get [Symbol.toStringTag]() { return "PerformanceObserver"; }
+  }
+  defineGlobal("PerformanceObserver", PerformanceObserver);
 })();
