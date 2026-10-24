@@ -878,6 +878,21 @@ html_process_script(void *ctx, dom_node *node)
 	}
 
 	if (js_supports_modules() &&
+	    (dom_string_byte_length(mimetype) == 9) &&
+	    (strncasecmp(dom_string_data(mimetype), "importmap",
+			 9) == 0)) {
+		/* says where the module specifiers are, and is not run */
+		dom_string *text = NULL;
+
+		if ((src == NULL) &&
+		    (dom_node_get_text_content(node, &text) == DOM_NO_ERR) &&
+		    (text != NULL)) {
+			js_importmap(c->jsthread,
+				     (const uint8_t *)dom_string_data(text),
+				     dom_string_byte_length(text));
+			dom_string_unref(text);
+		}
+	} else if (js_supports_modules() &&
 	    dom_string_caseless_lwc_isequal(mimetype, corestring_lwc_module)) {
 		err = exec_module_script(c, node, mimetype, src);
 	} else if (js_supports_modules() &&

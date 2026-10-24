@@ -1799,6 +1799,178 @@ struct js_module {
 static void qjsky_module_check_loads(jsthread *thread);
 
 
+/* the name of the global which holds the import map */
+#define QJSKY_IMPORTMAP "__netsurf_importmap"
+
+/**
+ * Find a specifier in one table of an import map.
+ *
+ * An exact match wins, then the longest key which ends in a slash and
+ * starts the specifier.
+ *
+ * \param jctx The context
+ * \param table The table, which maps specifiers to addresses
+ * \param key The specifier
+ * \return The address, allocated with js_malloc(), or NULL
+ */
+static char *
+qjsky_importmap_find(JSContext *jctx, JSValueConst table, const char *key)
+{
+	JSPropertyEnum *props = NULL;
+	uint32_t count = 0;
+	size_t keylen = strlen(key);
+	size_t best = 0;
+	JSValue found = JS_UNDEFINED;
+	char *ret = NULL;
+
+	if (!JS_IsObject(table)) {
+		return NULL;
+	}
+
+	found = JS_GetPropertyStr(jctx, table, key);
+	if (JS_IsString(found)) {
+		const char *value = JS_ToCString(jctx, found);
+
+		if (value != NULL) {
+			ret = js_strdup(jctx, value);
+			JS_FreeCString(jctx, value);
+		}
+		JS_FreeValue(jctx, found);
+		return ret;
+	}
+	JS_FreeValue(jctx, found);
+
+	if (JS_GetOwnPropertyNames(jctx, &props, &count, table,
+				   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) != 0) {
+		return NULL;
+	}
+
+	for (uint32_t i = 0; i < count; i++) {
+		const char *name = JS_AtomToCString(jctx, props[i].atom);
+
+		if (name != NULL) {
+			size_t len = strlen(name);
+
+			if ((len > best) && (len < keylen) &&
+			    (name[len - 1] == '/') &&
+			    (strncmp(name, key, len) == 0)) {
+				JSValue v = JS_GetProperty(jctx, table, props[i].atom);
+
+				if (JS_IsString(v)) {
+					const char *value = JS_ToCString(jctx, v);
+
+					if (value != NULL) {
+						size_t vlen = strlen(value);
+
+						js_free(jctx, ret);
+						ret = js_malloc(jctx, vlen + keylen - len + 1);
+						if (ret != NULL) {
+							memcpy(ret, value, vlen);
+							strcpy(ret + vlen, key + len);
+							best = len;
+						}
+						JS_FreeCString(jctx, value);
+					}
+				}
+				JS_FreeValue(jctx, v);
+			}
+			JS_FreeCString(jctx, name);
+		}
+		JS_FreeAtom(jctx, props[i].atom);
+	}
+	js_free(jctx, props);
+
+	return ret;
+}
+
+
+/**
+ * Map a specifier through the import map of the document.
+ *
+ * \param jctx The context
+ * \param referrer The URL of the importing script, or NULL
+ * \param key The specifier, as a URL if it is one
+ * \return The address, allocated with js_malloc(), or NULL if the map
+ *         does not have one
+ */
+static char *
+qjsky_importmap_resolve(JSContext *jctx, const char *referrer, const char *key)
+{
+	jsthread *thread = qjsky_thread(qjsduk_from_js(jctx));
+	JSValue map;
+	JSValue scopes;
+	JSValue imports;
+	char *ret = NULL;
+
+	map = JS_GetPropertyStr(jctx, thread->global, QJSKY_IMPORTMAP);
+	if (!JS_IsObject(map)) {
+		JS_FreeValue(jctx, map);
+		return NULL;
+	}
+
+	/* the scope with the longest URL which starts the referrer */
+	scopes = JS_GetPropertyStr(jctx, map, "scopes");
+	if ((referrer != NULL) && JS_IsObject(scopes)) {
+		JSPropertyEnum *props = NULL;
+		uint32_t count = 0;
+		size_t best = 0;
+
+		if (JS_GetOwnPropertyNames(jctx, &props, &count, scopes,
+					   JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+			for (uint32_t i = 0; i < count; i++) {
+				const char *name = JS_AtomToCString(jctx, props[i].atom);
+
+				if (name != NULL) {
+					html_content *htmlc = qjsky_html_content(thread);
+					nsurl *joined = NULL;
+					const char *scope = name;
+					size_t len;
+
+					/* scope URLs are relative to the document */
+					if ((htmlc != NULL) && (htmlc->base_url != NULL) &&
+					    (nsurl_join(htmlc->base_url, name,
+							&joined) == NSERROR_OK)) {
+						scope = nsurl_access(joined);
+					}
+					len = strlen(scope);
+
+					if ((len >= best) &&
+					    (strncmp(scope, referrer, len) == 0)) {
+						JSValue table = JS_GetProperty(jctx,
+								scopes, props[i].atom);
+						char *found = qjsky_importmap_find(jctx,
+								table, key);
+
+						if (found != NULL) {
+							js_free(jctx, ret);
+							ret = found;
+							best = len;
+						}
+						JS_FreeValue(jctx, table);
+					}
+					if (joined != NULL) {
+						nsurl_unref(joined);
+					}
+					JS_FreeCString(jctx, name);
+				}
+				JS_FreeAtom(jctx, props[i].atom);
+			}
+			js_free(jctx, props);
+		}
+	}
+	JS_FreeValue(jctx, scopes);
+
+	if (ret == NULL) {
+		imports = JS_GetPropertyStr(jctx, map, "imports");
+		ret = qjsky_importmap_find(jctx, imports, key);
+		JS_FreeValue(jctx, imports);
+	}
+	JS_FreeValue(jctx, map);
+
+	return ret;
+}
+
+
 /**
  * Check if a module specifier starts with a URL scheme.
  */
@@ -1823,8 +1995,8 @@ static bool qjsky_module_has_scheme(const char *s)
 /**
  * Resolve a module specifier against the module importing it.
  *
- * Module normalisation callback for QuickJS.  Bare specifiers, which
- * need an import map, are not supported.
+ * Module normalisation callback for QuickJS.  Bare specifiers need an
+ * import map.
  *
  * \param jctx The context importing the module
  * \param base Name of the importing module or script
@@ -1846,14 +2018,11 @@ qjsky_module_normalize(JSContext *jctx,
 	char *ret;
 	nserror err;
 
-	if ((strncmp(name, "/", 1) != 0) &&
-	    (strncmp(name, "./", 2) != 0) &&
-	    (strncmp(name, "../", 3) != 0) &&
-	    !qjsky_module_has_scheme(name)) {
-		JS_ThrowTypeError(jctx, "module specifier \"%s\" is not a "
-				  "relative or absolute URL", name);
-		return NULL;
-	}
+	bool is_url = (strncmp(name, "/", 1) == 0) ||
+			(strncmp(name, "./", 2) == 0) ||
+			(strncmp(name, "../", 3) == 0) ||
+			qjsky_module_has_scheme(name);
+	char *mapped = NULL;
 
 	/* classic scripts are named by URL, unless they are inline */
 	if ((base != NULL) && qjsky_module_has_scheme(base)) {
@@ -1869,8 +2038,43 @@ qjsky_module_normalize(JSContext *jctx,
 		return NULL;
 	}
 
-	err = nsurl_join(base_url, name, &joined);
+	/* URLs are looked up in the import map once they are absolute */
+	if (is_url) {
+		err = nsurl_join(base_url, name, &joined);
+		if (err != NSERROR_OK) {
+			nsurl_unref(base_url);
+			JS_ThrowTypeError(jctx, "invalid module URL \"%s\"", name);
+			return NULL;
+		}
+		mapped = qjsky_importmap_resolve(jctx,
+				((base != NULL) && qjsky_module_has_scheme(base)) ? base : NULL,
+				nsurl_access(joined));
+		if (mapped == NULL) {
+			nsurl_unref(base_url);
+			ret = js_strdup(jctx, nsurl_access(joined));
+			nsurl_unref(joined);
+			return ret;
+		}
+		nsurl_unref(joined);
+	} else {
+		mapped = qjsky_importmap_resolve(jctx,
+				((base != NULL) && qjsky_module_has_scheme(base)) ? base : NULL, name);
+		if (mapped == NULL) {
+			nsurl_unref(base_url);
+			JS_ThrowTypeError(jctx, "module specifier \"%s\" is not a "
+					  "relative or absolute URL", name);
+			return NULL;
+		}
+	}
+
+	/* the addresses in the map are relative to the document */
+	if ((htmlc != NULL) && (htmlc->base_url != NULL)) {
+		nsurl_unref(base_url);
+		base_url = nsurl_ref(htmlc->base_url);
+	}
+	err = nsurl_join(base_url, mapped, &joined);
 	nsurl_unref(base_url);
+	js_free(jctx, mapped);
 	if (err != NSERROR_OK) {
 		JS_ThrowTypeError(jctx, "invalid module URL \"%s\"", name);
 		return NULL;
@@ -2478,6 +2682,62 @@ static void qjsky_module_free_all(jsthread *thread)
 bool js_supports_modules(void)
 {
 	return true;
+}
+
+/* exported interface documented in js.h */
+void js_importmap(jsthread *thread, const uint8_t *txt, size_t txtlen)
+{
+	JSContext *jctx = thread->jctx;
+	JSValue map;
+	JSValue old;
+	const char *tables[] = { "imports", "scopes" };
+
+	map = JS_ParseJSON(jctx, (const char *)txt, txtlen, "importmap");
+	if (JS_IsException(map)) {
+		NSLOG(qjsky, WARNING, "Unable to parse the import map");
+		JS_FreeValue(jctx, JS_GetException(jctx));
+		return;
+	}
+	if (!JS_IsObject(map)) {
+		JS_FreeValue(jctx, map);
+		return;
+	}
+
+	/* a later map adds to the one before */
+	old = JS_GetPropertyStr(jctx, thread->global, QJSKY_IMPORTMAP);
+	if (JS_IsObject(old)) {
+		for (size_t i = 0; i < NOF_ELEMENTS(tables); i++) {
+			JSValue from = JS_GetPropertyStr(jctx, old, tables[i]);
+			JSValue to = JS_GetPropertyStr(jctx, map, tables[i]);
+			JSPropertyEnum *props = NULL;
+			uint32_t count = 0;
+
+			if (JS_IsObject(from) && !JS_IsObject(to)) {
+				JS_SetPropertyStr(jctx, map, tables[i],
+						  JS_DupValue(jctx, from));
+			} else if (JS_IsObject(from) &&
+				   (JS_GetOwnPropertyNames(jctx, &props, &count, from,
+						JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0)) {
+				for (uint32_t k = 0; k < count; k++) {
+					JSValue v = JS_GetProperty(jctx, from, props[k].atom);
+
+					if (JS_GetOwnProperty(jctx, NULL, to, props[k].atom) <= 0) {
+						JS_SetProperty(jctx, to, props[k].atom, v);
+					} else {
+						JS_FreeValue(jctx, v);
+					}
+					JS_FreeAtom(jctx, props[k].atom);
+				}
+				js_free(jctx, props);
+			}
+			JS_FreeValue(jctx, from);
+			JS_FreeValue(jctx, to);
+		}
+	}
+	JS_FreeValue(jctx, old);
+
+	JS_DefinePropertyValueStr(jctx, thread->global, QJSKY_IMPORTMAP, map,
+				  JS_PROP_CONFIGURABLE | JS_PROP_WRITABLE);
 }
 
 

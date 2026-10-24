@@ -927,6 +927,12 @@ bool js_supports_modules(void)
 
 
 /* exported interface documented in js.h */
+void js_importmap(jsthread *thread, const uint8_t *txt, size_t txtlen)
+{
+}
+
+
+/* exported interface documented in js.h */
 enum js_module_status
 js_module_load(jsthread *thread,
 	       const uint8_t *txt,

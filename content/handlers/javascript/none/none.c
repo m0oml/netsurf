@@ -71,6 +71,10 @@ bool js_supports_modules(void)
 	return false;
 }
 
+void js_importmap(jsthread *thread, const uint8_t *txt, size_t txtlen)
+{
+}
+
 enum js_module_status js_module_load(jsthread *thread, const uint8_t *txt, size_t txtlen, const char *url, bool is_inline, js_module_cb *cb, void *pw, struct js_module **module_out)
 {
 	return JS_MODULE_FAILED;

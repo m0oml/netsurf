@@ -160,6 +160,15 @@ typedef void (js_module_cb)(void *pw, struct js_module *module, enum js_module_s
 bool js_supports_modules(void);
 
 /**
+ * Add an import map, which says where module specifiers are to be found.
+ *
+ * \param thread The thread the map is for
+ * \param txt The JSON text of the map
+ * \param txtlen The length of the text
+ */
+void js_importmap(jsthread *thread, const uint8_t *txt, size_t txtlen);
+
+/**
  * Load a module script, fetching the modules it imports.
  *
  * \param thread The thread to load the module in
