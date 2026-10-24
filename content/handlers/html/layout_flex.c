@@ -829,8 +829,19 @@ static bool layout_flex__place_line_items_main(
 	int extra = 0;
 
 	if (ctx->main_reversed) {
-		main_pos = lh__box_size_main(ctx->horizontal, ctx->flex) -
-				main_pos;
+		int container_main = lh__box_size_main(ctx->horizontal,
+				ctx->flex);
+
+		if (container_main == AUTO ||
+		    container_main == UNKNOWN_WIDTH) {
+			/* the container is as large as its items */
+			container_main = line->used_main_size;
+		}
+
+		/* items are packed against the far end of the content box,
+		 * which is measured from the left or top padding edge */
+		main_pos = ctx->flex->padding[ctx->horizontal ? LEFT : TOP] +
+				container_main;
 	}
 
 	/* absolutely positioned children are placed as if they were the

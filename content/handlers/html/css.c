@@ -687,7 +687,11 @@ html_css_new_selection_context(html_content *c, css_select_ctx **ret_select_ctx)
 			origin = CSS_ORIGIN_USER;
 		}
 
-		if (hsheet->sheet != NULL) {
+		/* An early layout can run while a stylesheet is still being
+		 * fetched, when its handle has no content yet.
+		 */
+		if ((hsheet->sheet != NULL) &&
+		    (hlcache_handle_get_content(hsheet->sheet) != NULL)) {
 			sheet = nscss_get_stylesheet(hsheet->sheet);
 		}
 
