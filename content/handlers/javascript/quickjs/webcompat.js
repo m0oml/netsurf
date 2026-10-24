@@ -896,14 +896,6 @@
 
   defineMethods(Document.prototype, {
     hasFocus() { return true; },
-    createComment(data) {
-      /* comments are created through the parser */
-      const container = this.createElement("div");
-      container.innerHTML = "<!--" + String(data).replace(/--/g, "- -") + "-->";
-      const comment = container.firstChild;
-      container.removeChild(comment);
-      return comment;
-    },
     getElementsByName(name) {
       return this.querySelectorAll(`[name="${CSS.escape(String(name))}"]`);
     }
@@ -4519,4 +4511,482 @@
     get [Symbol.toStringTag]() { return "PerformanceObserver"; }
   }
   defineGlobal("PerformanceObserver", PerformanceObserver);
+
+  /* Constructors
+   *
+   * The bindings make these interfaces but not constructible, as the
+   * document makes the nodes.
+   */
+  const constructible = (name, make) => {
+    const original = global[name];
+    const ctor = function (...args) {
+      if (!new.target) {
+        throw new TypeError(`Failed to construct '${name}': Please use the 'new' operator`);
+      }
+      return make(...args);
+    };
+    Object.defineProperty(ctor, "name", { value: name, configurable: true });
+    if (original) {
+      Object.setPrototypeOf(ctor, Object.getPrototypeOf(original));
+      for (const key of Object.getOwnPropertyNames(original)) {
+        if (key !== "prototype" && key !== "length" && key !== "name") {
+          Object.defineProperty(ctor, key, Object.getOwnPropertyDescriptor(original, key));
+        }
+      }
+      Object.defineProperty(ctor, "prototype", { value: original.prototype });
+      Object.defineProperty(original.prototype, "constructor", {
+        value: ctor, writable: true, configurable: true
+      });
+    }
+    defineGlobal(name, ctor);
+  };
+
+  constructible("Text", (data = "") => global.document.createTextNode(String(data)));
+  constructible("Comment", (data = "") => global.document.createComment(String(data)));
+  constructible("DocumentFragment", () => global.document.createDocumentFragment());
+  constructible("Image", (width, height) => {
+    const img = global.document.createElement("img");
+    if (width !== undefined) {
+      img.setAttribute("width", String(width));
+    }
+    if (height !== undefined) {
+      img.setAttribute("height", String(height));
+    }
+    return img;
+  });
+  constructible("Audio", (src) => {
+    const audio = global.document.createElement("audio");
+    if (src !== undefined) {
+      audio.setAttribute("src", String(src));
+    }
+    return audio;
+  });
+  constructible("Option", (text = "", value, defaultSelected = false, selected = false) => {
+    const option = global.document.createElement("option");
+    option.textContent = String(text);
+    if (value !== undefined) {
+      option.setAttribute("value", String(value));
+    }
+    if (defaultSelected || selected) {
+      option.setAttribute("selected", "");
+    }
+    return option;
+  });
+  constructible("XMLSerializer", function () {
+    return {
+      serializeToString(node) {
+        if (node.nodeType === 1) {
+          return node.outerHTML;
+        }
+        if (node.nodeType === 9) {
+          return node.documentElement ? node.documentElement.outerHTML : "";
+        }
+        if (node.nodeType === 11) {
+          return Array.from(node.childNodes, (c) => c.nodeType === 1 ? c.outerHTML : c.textContent).join("");
+        }
+        return node.textContent;
+      }
+    };
+  });
+  constructible("DOMParser", function () {
+    return {
+      /** \todo parse XML and SVG as such */
+      parseFromString(source, type) {
+        const doc = global.document.implementation.createHTMLDocument("");
+        doc.documentElement.innerHTML = String(source);
+        return doc;
+      }
+    };
+  });
+
+  /* Interfaces the bindings define but which cannot work are better
+   * absent, so that feature detection finds out
+   */
+  for (const name of ["Worker", "SharedWorker", "WebSocket", "EventSource", "BroadcastChannel"]) {
+    delete global[name];
+  }
+
+  /* Collections the bindings make can be indexed but not iterated */
+  for (const name of ["NodeList", "HTMLCollection", "DOMTokenList", "NamedNodeMap"]) {
+    const ctor = global[name];
+    if (typeof ctor !== "function" || !ctor.prototype) {
+      continue;
+    }
+    const at = (list, i) => (typeof list.item === "function" ? list.item(i) : list[i]);
+    const methods = {
+      *[Symbol.iterator]() {
+        for (let i = 0; i < this.length; i++) {
+          yield at(this, i);
+        }
+      },
+      *values() {
+        for (let i = 0; i < this.length; i++) {
+          yield at(this, i);
+        }
+      },
+      *keys() {
+        for (let i = 0; i < this.length; i++) {
+          yield i;
+        }
+      },
+      *entries() {
+        for (let i = 0; i < this.length; i++) {
+          yield [i, at(this, i)];
+        }
+      },
+      forEach(callback, thisArg) {
+        for (let i = 0; i < this.length; i++) {
+          callback.call(thisArg, at(this, i), i, this);
+        }
+      }
+    };
+    for (const key of Reflect.ownKeys(methods)) {
+      /* NamedNodeMap and HTMLCollection have no forEach or values */
+      if (!Object.prototype.hasOwnProperty.call(ctor.prototype, key) &&
+          !(key === "forEach" && (name === "HTMLCollection" || name === "NamedNodeMap")) &&
+          !((key === "values" || key === "keys" || key === "entries") &&
+            (name === "HTMLCollection" || name === "NamedNodeMap"))) {
+        Object.defineProperty(ctor.prototype, key, {
+          value: methods[key], writable: true, configurable: true
+        });
+      }
+    }
+  }
+
+  /* The controls of forms and the options of selects, as lists made when
+   * asked for
+   */
+  const withNamedItem = (list) => {
+    Object.defineProperty(list, "item", {
+      value(i) { return this[i] || null; }, configurable: true
+    });
+    Object.defineProperty(list, "namedItem", {
+      value(name) {
+        return this.find((e) => e.id === name || e.getAttribute("name") === name) || null;
+      },
+      configurable: true
+    });
+    return list;
+  };
+
+  /* these replace members which the bindings have but do nothing with */
+  const defineMember = (proto, name, descriptor) => {
+    if (proto) {
+      Object.defineProperty(proto, name, { ...descriptor, configurable: true, enumerable: true });
+    }
+  };
+
+  const formElements = (form) => withNamedItem(
+    Array.from(form.querySelectorAll("input, select, textarea, button, fieldset, object, output"))
+      .filter((e) => e.form === form && !(e.tagName === "INPUT" && e.type === "image")));
+  defineMember(global.HTMLFormElement && global.HTMLFormElement.prototype, "elements", {
+    get() { return formElements(this); }
+  });
+  defineMember(global.HTMLFormElement && global.HTMLFormElement.prototype, "length", {
+    get() { return formElements(this).length; }
+  });
+
+  const selectOptions = (select) => withNamedItem(
+    Array.from(select.querySelectorAll("option")).filter((o) => {
+      const parent = o.parentNode;
+      return parent === select || (parent.tagName === "OPTGROUP" && parent.parentNode === select);
+    }));
+  defineMember(global.HTMLSelectElement && global.HTMLSelectElement.prototype, "options", {
+    get() { return selectOptions(this); }
+  });
+  defineMember(global.HTMLSelectElement && global.HTMLSelectElement.prototype, "length", {
+    get() { return selectOptions(this).length; }
+  });
+  defineMember(global.HTMLSelectElement && global.HTMLSelectElement.prototype, "selectedOptions", {
+    get() { return withNamedItem(selectOptions(this).filter((o) => o.selected)); }
+  });
+
+  /* Templates, whose content is the nodes in the template */
+  {
+    /* the prototype of templates, which is not always the interface's */
+    const templateProto = Object.getPrototypeOf(global.document.createElement("template"));
+    const own = Object.getOwnPropertyDescriptor(templateProto, "content");
+    Object.defineProperty(templateProto, "content", {
+      get() {
+        if (this.tagName.toLowerCase() !== "template") {
+          return own && own.get ? own.get.call(this) : this.getAttribute("content") ?? undefined;
+        }
+        const fragment = global.document.createDocumentFragment();
+        for (const child of this.childNodes) {
+          fragment.appendChild(child.cloneNode(true));
+        }
+        return fragment;
+      },
+      set(value) { this.setAttribute("content", String(value)); },
+      enumerable: true,
+      configurable: true
+    });
+  }
+
+  /* Idle callbacks */
+
+  global.requestIdleCallback = function requestIdleCallback(callback, options) {
+    const start = Date.now();
+    return setTimeout(() => {
+      callback({
+        didTimeout: false,
+        timeRemaining: () => Math.max(0, 50 - (Date.now() - start))
+      });
+    }, 1);
+  };
+  global.cancelIdleCallback = function cancelIdleCallback(id) {
+    clearTimeout(id);
+  };
+
+  /* Selection */
+
+  /** \todo track the selection */
+  global.getSelection = function getSelection() {
+    return {
+      rangeCount: 0,
+      isCollapsed: true,
+      type: "None",
+      anchorNode: null,
+      focusNode: null,
+      anchorOffset: 0,
+      focusOffset: 0,
+      toString: () => "",
+      removeAllRanges() {},
+      addRange() {},
+      removeRange() {},
+      empty() {},
+      getRangeAt() {
+        throw domError("IndexSizeError", "no range");
+      }
+    };
+  };
+  global.document.getSelection = global.getSelection;
+
+  /* Message channels */
+
+  class MessagePort extends EventTarget {
+    #peer = null;
+    #closed = false;
+    onmessage = null;
+    onmessageerror = null;
+
+    static connect(a, b) {
+      a.#peer = b;
+      b.#peer = a;
+    }
+
+    postMessage(message) {
+      const peer = this.#peer;
+      if (peer === null || this.#closed) {
+        return;
+      }
+      setTimeout(() => peer.#deliver(structuredClone(message)), 0);
+    }
+
+    #deliver(data) {
+      if (this.#closed) {
+        return;
+      }
+      const event = new MessageEvent("message", { data });
+      if (typeof this.onmessage === "function") {
+        this.onmessage(event);
+      }
+      this.dispatchEvent(event);
+    }
+
+    start() {}
+
+    close() { this.#closed = true; }
+  }
+  class MessageChannel {
+    constructor() {
+      this.port1 = new MessagePort();
+      this.port2 = new MessagePort();
+      MessagePort.connect(this.port1, this.port2);
+    }
+  }
+  defineGlobal("MessagePort", MessagePort);
+  defineGlobal("MessageChannel", MessageChannel);
+
+  /* Intl
+   *
+   * Formats in English, which is what the C library gives anyway.
+   */
+  if (global.Intl === undefined) {
+    const currencies = { GBP: "£", USD: "$", EUR: "€", JPY: "¥", INR: "₹" };
+    const group = (digits) => digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+    const localeOf = (locales) => {
+      const first = Array.isArray(locales) ? locales[0] : locales;
+      return typeof first === "string" ? first : "en-GB";
+    };
+
+    class NumberFormat {
+      #options;
+      #locale;
+      constructor(locales, options = {}) {
+        this.#locale = localeOf(locales);
+        this.#options = options || {};
+      }
+
+      format(value) {
+        const o = this.#options;
+        let n = Number(value);
+        if (Number.isNaN(n)) {
+          return "NaN";
+        }
+        if (o.style === "percent") {
+          n *= 100;
+        }
+        const min = o.minimumFractionDigits !== undefined ? o.minimumFractionDigits :
+          (o.style === "currency" ? 2 : 0);
+        const max = o.maximumFractionDigits !== undefined ? Math.max(o.maximumFractionDigits, min) :
+          (o.style === "currency" ? Math.max(2, min) : Math.max(3, min));
+        let text = Math.abs(n).toFixed(max);
+        if (max > min && text.includes(".")) {
+          text = text.replace(new RegExp(`0{1,${max - min}}$`), "").replace(/\.$/, "");
+        }
+        const [whole, fraction] = text.split(".");
+        let out = (o.useGrouping === false ? whole : group(whole)) + (fraction ? "." + fraction : "");
+        if (o.style === "currency") {
+          out = (currencies[o.currency] || o.currency + " ") + out;
+        } else if (o.style === "percent") {
+          out += "%";
+        }
+        return (n < 0 ? "-" : "") + out;
+      }
+
+      formatToParts(value) { return [{ type: "literal", value: this.format(value) }]; }
+
+      resolvedOptions() {
+        return { locale: this.#locale, numberingSystem: "latn", style: this.#options.style || "decimal" };
+      }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class DateTimeFormat {
+      #locale;
+      #options;
+      constructor(locales, options = {}) {
+        this.#locale = localeOf(locales);
+        this.#options = options || {};
+      }
+
+      format(date) {
+        const d = date === undefined ? new Date() : new Date(date);
+        const o = this.#options;
+        if (o.timeStyle || (o.hour && !o.year && !o.month && !o.day)) {
+          return d.toLocaleTimeString();
+        }
+        if (o.dateStyle || o.year || o.month || o.day || o.weekday) {
+          return d.toLocaleDateString();
+        }
+        return d.toLocaleDateString();
+      }
+
+      formatToParts(date) { return [{ type: "literal", value: this.format(date) }]; }
+
+      resolvedOptions() {
+        return {
+          locale: this.#locale, calendar: "gregory", numberingSystem: "latn", timeZone: "UTC"
+        };
+      }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class Collator {
+      constructor(locales, options = {}) {
+        const numeric = !!(options && options.numeric);
+        this.compare = (a, b) => {
+          a = String(a);
+          b = String(b);
+          if (numeric) {
+            const x = parseFloat(a);
+            const y = parseFloat(b);
+            if (!Number.isNaN(x) && !Number.isNaN(y) && x !== y) {
+              return x < y ? -1 : 1;
+            }
+          }
+          return a.localeCompare(b);
+        };
+      }
+
+      resolvedOptions() { return { locale: "en-GB", usage: "sort", sensitivity: "variant" }; }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class PluralRules {
+      constructor(locales, options = {}) { this.ordinal = !!(options && options.type === "ordinal"); }
+
+      select(n) {
+        if (this.ordinal) {
+          const t = n % 10;
+          const h = n % 100;
+          if (t === 1 && h !== 11) { return "one"; }
+          if (t === 2 && h !== 12) { return "two"; }
+          if (t === 3 && h !== 13) { return "few"; }
+          return "other";
+        }
+        return n === 1 ? "one" : "other";
+      }
+
+      resolvedOptions() { return { locale: "en-GB" }; }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class RelativeTimeFormat {
+      format(value, unit) {
+        const u = String(unit).replace(/s$/, "");
+        const n = Math.abs(value);
+        const text = `${n} ${u}${n === 1 ? "" : "s"}`;
+        return value < 0 || Object.is(value, -0) ? `${text} ago` : `in ${text}`;
+      }
+
+      resolvedOptions() { return { locale: "en-GB" }; }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class ListFormat {
+      #type;
+      constructor(locales, options = {}) { this.#type = (options && options.type) || "conjunction"; }
+
+      format(list) {
+        const items = Array.from(list, String);
+        const word = this.#type === "disjunction" ? "or" : "and";
+        if (items.length < 3) {
+          return items.join(` ${word} `);
+        }
+        return items.slice(0, -1).join(", ") + ` ${word} ` + items[items.length - 1];
+      }
+
+      static supportedLocalesOf(locales) { return [].concat(locales || []); }
+    }
+
+    class Segmenter {
+      segment(text) {
+        const out = [];
+        let index = 0;
+        for (const segment of String(text)) {
+          out.push({ segment, index, input: text });
+          index += segment.length;
+        }
+        return out;
+      }
+    }
+
+    const Intl = {
+      NumberFormat, DateTimeFormat, Collator, PluralRules, RelativeTimeFormat, ListFormat, Segmenter,
+      getCanonicalLocales: (locales) => [].concat(locales || []),
+      supportedValuesOf: () => []
+    };
+    for (const key of Object.keys(Intl)) {
+      Object.defineProperty(Intl, key, { enumerable: false });
+    }
+    Object.defineProperty(Intl, Symbol.toStringTag, { value: "Intl" });
+    defineGlobal("Intl", Intl);
+  }
 })();

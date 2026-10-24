@@ -118,6 +118,34 @@ method Document::createTextNode()
 	return 1;
 %}
 
+method Document::createComment()
+%{
+	dom_node *newnode;
+	dom_exception err;
+	duk_size_t text_len;
+	const char *text = duk_safe_to_lstring(ctx, 0, &text_len);
+	dom_string *text_str;
+
+	err = dom_string_create((const uint8_t*)text, text_len, &text_str);
+	if (err != DOM_NO_ERR) return 0; /* coerced to undefined */
+
+	err = dom_document_create_comment(priv->parent.node,
+					    text_str,
+					    &newnode);
+	if (err != DOM_NO_ERR) {
+		dom_string_unref(text_str);
+		return 0; /* coerced to undefined */
+	}
+
+	dom_string_unref(text_str);
+
+	dukky_push_node(ctx, newnode);
+
+	dom_node_unref(newnode);
+
+	return 1;
+%}
+
 method Document::createElement()
 %{
 	dom_node *newnode;

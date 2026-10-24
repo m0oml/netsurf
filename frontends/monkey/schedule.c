@@ -129,9 +129,22 @@ nserror monkey_schedule(int tival, void (*callback)(void *p), void *p)
 	nscb->callback = callback;
 	nscb->p = p;
 
-	/* add to list front */
-	nscb->next = schedule_list;
-	schedule_list = nscb;
+	/* keep the list in the order callbacks are due, and in the order
+	 * they were added when due together
+	 */
+	if (schedule_list == NULL || timercmp(&nscb->tv, &schedule_list->tv, <)) {
+		nscb->next = schedule_list;
+		schedule_list = nscb;
+	} else {
+		struct nscallback *prev = schedule_list;
+
+		while (prev->next != NULL &&
+		       !timercmp(&nscb->tv, &prev->next->tv, <)) {
+			prev = prev->next;
+		}
+		nscb->next = prev->next;
+		prev->next = nscb;
+	}
 
 	return NSERROR_OK;
 }
