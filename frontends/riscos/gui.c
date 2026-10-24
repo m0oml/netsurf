@@ -331,6 +331,11 @@ static nserror set_defaults(struct nsoption_s *defaults)
 	 */
 	nsoption_set_uint(disc_cache_size, 0);
 
+	/* Run scripts unless the user has chosen otherwise.  Without a
+	 * JavaScript engine the dummy one switches this off again.
+	 */
+	nsoption_set_bool(enable_javascript, true);
+
 	/* Override core default treeview font size with 12 pt.
 	 * TODO: 12 is the normal desktop font size, but users might run
 	 *       with something different.
