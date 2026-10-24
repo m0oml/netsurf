@@ -1624,6 +1624,32 @@ static void css_hint_list(
 }
 
 
+/**
+ * Check if an element is an svg element in the SVG namespace.
+ */
+static bool css_hint_is_svg(dom_node *node)
+{
+	dom_string *name = NULL;
+	dom_string *ns = NULL;
+	bool svg = false;
+
+	if ((dom_node_get_namespace(node, &ns) != DOM_NO_ERR) || (ns == NULL)) {
+		return false;
+	}
+	if (dom_string_isequal(ns, dom_namespaces[DOM_NAMESPACE_SVG]) &&
+	    (dom_node_get_local_name(node, &name) == DOM_NO_ERR) &&
+	    (name != NULL)) {
+		svg = (strcasecmp(dom_string_data(name), "svg") == 0);
+	}
+	if (name != NULL) {
+		dom_string_unref(name);
+	}
+	dom_string_unref(ns);
+
+	return svg;
+}
+
+
 /* Exported function, documented in css/hints.h */
 css_error node_presentational_hint(void *pw, void *node,
 		uint32_t *nhints, css_hint **hints)
@@ -1725,6 +1751,12 @@ css_error node_presentational_hint(void *pw, void *node,
 		css_hint_list(pw, node);
 		break;
 	default:
+		if (tag_type == DOM_HTML_ELEMENT_TYPE__UNKNOWN &&
+		    css_hint_is_svg(node)) {
+			/* inline SVG sizes itself from these attributes */
+			css_hint_height(pw, node);
+			css_hint_width(pw, node);
+		}
 		break;
 	}
 

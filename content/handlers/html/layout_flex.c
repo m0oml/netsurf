@@ -716,6 +716,8 @@ static bool layout_flex__resolve_line(
 	int available_main = ctx->available_main;
 	int initial_free_main;
 	bool grow;
+	bool indefinite = (available_main == AUTO ||
+			available_main == UNKNOWN_WIDTH);
 
 	if (available_main == AUTO) {
 		available_main = INT_MAX;
@@ -739,6 +741,16 @@ static bool layout_flex__resolve_line(
 			 */
 			item->target_main_size = item->main_size;
 			layout_flex__item_freeze(line, item);
+			continue;
+		}
+
+		/* An automatic main size has no free space to share, so
+		 * the items keep their own sizes
+		 */
+		if (indefinite) {
+			item->target_main_size = item->main_size;
+			layout_flex__item_freeze(line, item);
+			initial_free_main -= item->target_main_size;
 			continue;
 		}
 

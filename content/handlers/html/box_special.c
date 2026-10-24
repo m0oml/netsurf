@@ -2096,6 +2096,17 @@ box_svg_write_node(struct box_svg_writer *w, dom_node *n, bool root)
 			    (avalue != NULL)) {
 				const char *an = dom_string_data(aname);
 
+				if (root &&
+				    (strcasecmp(an, "width") == 0 ||
+				     strcasecmp(an, "height") == 0) &&
+				    (strchr(dom_string_data(avalue), '%') != NULL)) {
+					/* a percentage is of the page layout, which
+					 * the CSS sizes the image to; the image
+					 * itself is sized by its view box
+					 */
+					goto skip_attr;
+				}
+
 				if (strcmp(an, "xmlns") == 0) {
 					has_xmlns = true;
 				} else if (strcmp(an, "xmlns:xlink") == 0) {
@@ -2123,6 +2134,7 @@ box_svg_write_node(struct box_svg_writer *w, dom_node *n, bool root)
 					dom_string_byte_length(avalue));
 				box_svg_write(w, "\"", 1);
 			}
+skip_attr:
 			if (aname != NULL) {
 				dom_string_unref(aname);
 			}
