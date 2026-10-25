@@ -80,6 +80,7 @@ struct flex_line_data {
 
 	int used_main_size;
 	int main_auto_margin_count;
+	int gaps;	/**< total of the gaps between items on the line */
 
 	int pos;
 
@@ -101,6 +102,9 @@ struct flex_ctx {
 
 	int available_main;
 	int available_cross;
+
+	int main_gap;	/**< gap between items on a line */
+	int cross_gap;	/**< gap between lines */
 
 	bool horizontal;
 	bool main_reversed;
@@ -522,20 +526,23 @@ static struct flex_line_data *layout_flex__build_line(struct flex_ctx *ctx,
 		struct flex_item_data *item = &ctx->item.data[item_index];
 		struct box *b = item->box;
 		int pos_main;
+		int gap = (line->count > 0 && !lh__box_is_absolute(b)) ?
+				ctx->main_gap : 0;
 
 		pos_main = ctx->horizontal ?
 				item->main_size :
 				b->height + lh__delta_outer_main(ctx->flex, b);
 
 		if (ctx->wrap == CSS_FLEX_WRAP_NOWRAP ||
-		    pos_main + used_main <= ctx->available_main ||
+		    pos_main + gap + used_main <= ctx->available_main ||
 		    lh__box_is_absolute(item->box) ||
 		    ctx->available_main == AUTO ||
 		    line->count == 0 ||
 		    pos_main == 0) {
 			if (lh__box_is_absolute(item->box) == false) {
-				line->main_size += item->main_size;
-				used_main += pos_main;
+				line->main_size += item->main_size + gap;
+				used_main += pos_main + gap;
+				line->gaps += gap;
 
 				if (b->margin[start_side] == AUTO) {
 					line->main_auto_margin_count++;
@@ -814,6 +821,11 @@ static bool layout_flex__resolve_line(
 	}
 
 	grow = (line->main_size < available_main);
+
+	/* The gaps between items are not free space */
+	if (!indefinite) {
+		available_main -= line->gaps;
+	}
 	initial_free_main = available_main;
 
 	NSLOG(flex, DEEPDEBUG, "box %p: line %zu: first: %zu, count: %zu",
@@ -916,6 +928,8 @@ static bool layout_flex__resolve_line(
 			}
 		}
 	}
+
+	line->used_main_size += line->gaps;
 
 	return true;
 }
@@ -1033,6 +1047,8 @@ static bool layout_flex__place_line_items_main(
 			main_pos += post_multiplier *
 					(extra_total + box_size_main +
 					 lh__delta_outer_main(ctx->flex, b));
+			main_pos += ctx->main_reversed ?
+					-ctx->main_gap : ctx->main_gap;
 
 			cross_size = box_size_cross + lh__delta_outer_cross(
 					ctx->flex, b);
@@ -1080,6 +1096,9 @@ static bool layout_flex__collect_items_into_lines(
 		}
 
 		ctx->cross_size += line->cross_size;
+		if (ctx->line.count > 1) {
+			ctx->cross_size += ctx->cross_gap;
+		}
 		if (ctx->main_size < line->main_size) {
 			ctx->main_size = line->main_size;
 		}
@@ -1181,6 +1200,7 @@ static void layout_flex__place_lines(struct flex_ctx *ctx)
 		line->pos = line_pos;
 		line_pos += post_multiplier * line->cross_size +
 				extra + extra_remainder;
+		line_pos += reversed ? -ctx->cross_gap : ctx->cross_gap;
 
 		layout_flex__place_line_items_cross(ctx, line,
 				extra + extra_remainder);
@@ -1189,6 +1209,39 @@ static void layout_flex__place_lines(struct flex_ctx *ctx)
 			extra_remainder--;
 		}
 	}
+}
+
+/**
+ * Find a gap of a flex container.
+ *
+ * \param[in] ctx        Flex layout context
+ * \param[in] row        Whether to find the row gap, rather than the column gap
+ * \param[in] available  Size a percentage is of, or AUTO if not known
+ * \return the gap in pixels
+ */
+static int layout_flex__gap(const struct flex_ctx *ctx, bool row,
+		int available)
+{
+	css_fixed length = 0;
+	css_unit unit = CSS_UNIT_PX;
+	uint8_t type;
+
+	type = row ? css_computed_row_gap(ctx->flex->style, &length, &unit) :
+			css_computed_column_gap(ctx->flex->style, &length,
+			&unit);
+	if (type != CSS_COLUMN_GAP_SET) {
+		return 0;
+	}
+
+	if (unit == CSS_UNIT_PCT) {
+		if (available == AUTO || available == UNKNOWN_WIDTH) {
+			return 0;
+		}
+		return FPCT_OF_INT_TOINT(length, available);
+	}
+
+	return FIXTOINT(css_unit_len2device_px(ctx->flex->style,
+			ctx->unit_len_ctx, length, unit));
 }
 
 /**
@@ -1234,6 +1287,11 @@ bool layout_flex(struct box *flex, int available_width,
 		ctx->available_main = ctx->flex->height;
 		ctx->available_cross = available_width;
 	}
+
+	ctx->main_gap = layout_flex__gap(ctx, !ctx->horizontal,
+			ctx->available_main);
+	ctx->cross_gap = layout_flex__gap(ctx, ctx->horizontal,
+			ctx->available_cross);
 
 	NSLOG(flex, DEEPDEBUG, "box %p: available_main: %i",
 			flex, ctx->available_main);

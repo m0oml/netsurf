@@ -32,6 +32,8 @@
     viewport: global.__netsurf_viewport,
     /* computed value of a css property of an element, or undefined */
     style: global.__netsurf_style,
+    /* whether a css supports condition holds */
+    cssSupports: global.__netsurf_css_supports,
     /* scroll the window to a document position */
     scrollTo: global.__netsurf_scroll_to,
     /* start a network request, returning its id; see qjsky.c */
@@ -44,7 +46,8 @@
     windowDispatch: global.__netsurf_window_dispatch
   };
   for (const name of ["__netsurf_geometry", "__netsurf_viewport",
-                      "__netsurf_style", "__netsurf_scroll_to",
+                      "__netsurf_style", "__netsurf_css_supports",
+                      "__netsurf_scroll_to",
                       "__netsurf_fetch", "__netsurf_fetch_abort",
                       "__netsurf_decode", "__netsurf_window_dispatch"]) {
     delete global[name];
@@ -1046,8 +1049,26 @@
       }
       return out;
     },
-    supports() {
-      return false;
+    /* supports(property, value) or supports(condition) */
+    supports(...args) {
+      if (args.length === 0) {
+        throw new TypeError("CSS.supports requires an argument");
+      }
+      if (args.length >= 2) {
+        const property = String(args[0]).trim();
+        const value = String(args[1]).trim();
+        if (!property.startsWith("--") &&
+            !supportedProperties.has(property.toLowerCase())) {
+          return false;
+        }
+        return native.cssSupports("(" + property + ": " + value + ")");
+      }
+      let condition = String(args[0]).trim();
+      if (!/^(\(|not\b|selector\()/i.test(condition)) {
+        /* a declaration without its brackets */
+        condition = "(" + condition + ")";
+      }
+      return native.cssSupports(condition);
     }
   }));
 
@@ -1061,6 +1082,12 @@
 
   const supportedProperties = new Set((
     "align-content align-items align-self azimuth background " +
+    "gap row-gap grid-gap grid-row-gap grid-column-gap grid-area " +
+    "grid-auto-columns grid-auto-flow grid-auto-rows grid-column " +
+    "grid-column-end grid-column-start grid-row grid-row-end " +
+    "grid-row-start grid-template grid-template-areas " +
+    "grid-template-columns grid-template-rows justify-items justify-self " +
+    "place-content place-items place-self " +
     "background-attachment background-color background-image " +
     "background-position background-repeat background-size border " +
     "border-bottom border-bottom-color border-bottom-left-radius " +

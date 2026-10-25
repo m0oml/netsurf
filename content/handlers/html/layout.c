@@ -983,6 +983,7 @@ static void layout_minmax_block(
 	bool using_min_border_box = false;
 	bool using_max_border_box = false;
 	bool child_has_height = false;
+	int flex_items = 0;
 
 	assert(block->type == BOX_BLOCK ||
 			block->type == BOX_FLEX ||
@@ -1127,15 +1128,30 @@ static void layout_minmax_block(
 
 			if (lh__box_is_flex_container(block) &&
 			    lh__flex_main_is_horizontal(block)) {
+				int gap = 0;
+				css_fixed gap_length = 0;
+				css_unit gap_unit = CSS_UNIT_PX;
+
+				if (flex_items++ > 0 && block->style != NULL &&
+				    css_computed_column_gap(block->style,
+						&gap_length, &gap_unit) ==
+						CSS_COLUMN_GAP_SET &&
+				    gap_unit != CSS_UNIT_PCT) {
+					gap = FIXTOINT(css_unit_len2device_px(
+							block->style,
+							&content->unit_len_ctx,
+							gap_length, gap_unit));
+				}
+
 				if (block->style != NULL &&
 				    css_computed_flex_wrap(block->style) ==
 						CSS_FLEX_WRAP_NOWRAP) {
-					min += child->min_width;
+					min += child->min_width + gap;
 				} else {
 					if (min < child->min_width)
 						min = child->min_width;
 				}
-				max += child->max_width;
+				max += child->max_width + gap;
 
 			} else {
 				if (min < child->min_width)

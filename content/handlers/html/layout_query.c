@@ -586,6 +586,45 @@ static char *html_layout_box_value(struct box *box, const char *property)
 }
 
 
+/**
+ * Get the computed value of row-gap or column-gap.
+ *
+ * \return the value, or NULL if the property is not one of these
+ */
+static char *
+html_layout_gap_value(const css_computed_style *style,
+		      const css_unit_ctx *unit_len_ctx,
+		      const char *property)
+{
+	css_fixed length = 0;
+	css_unit unit = CSS_UNIT_PX;
+	char buf[32];
+	uint8_t type;
+
+	if (strcmp(property, "row-gap") == 0) {
+		type = css_computed_row_gap(style, &length, &unit);
+	} else if (strcmp(property, "column-gap") == 0) {
+		type = css_computed_column_gap(style, &length, &unit);
+	} else {
+		return NULL;
+	}
+
+	if (type != CSS_COLUMN_GAP_SET) {
+		return strdup("normal");
+	}
+
+	if (unit == CSS_UNIT_PCT) {
+		snprintf(buf, sizeof buf, "%g%%", FIXTOFLT(length));
+	} else {
+		snprintf(buf, sizeof buf, "%gpx", FIXTOFLT(
+				css_unit_len2device_px(style, unit_len_ctx,
+						       length, unit)));
+	}
+
+	return strdup(buf);
+}
+
+
 /* exported interface documented in html/private.h */
 char *
 html_layout_computed_style(html_content *htmlc,
@@ -620,6 +659,12 @@ html_layout_computed_style(html_content *htmlc,
 		return value;
 	}
 
+	value = html_layout_gap_value(box->style, &htmlc->unit_len_ctx,
+				      property);
+	if (value != NULL) {
+		return value;
+	}
+
 	value = html_layout_transform_value(box, &htmlc->unit_len_ctx,
 					    property);
 	if (value != NULL) {
@@ -627,4 +672,19 @@ html_layout_computed_style(html_content *htmlc,
 	}
 
 	return html_layout_box_value(box, property);
+}
+
+
+/* exported interface documented in html/private.h */
+bool
+html_layout_css_supports(const char *condition)
+{
+	bool supported = false;
+
+	if (css_supports(condition, strlen(condition), &supported) !=
+	    CSS_OK) {
+		return false;
+	}
+
+	return supported;
 }

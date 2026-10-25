@@ -382,6 +382,14 @@ void html_layout_viewport(html_content *htmlc, int *width, int *height, int *scr
 char *html_layout_computed_style(html_content *htmlc, struct dom_node *node, const char *property);
 
 /**
+ * Check whether a CSS supports condition holds, as CSS.supports() does.
+ *
+ * \param condition  The condition, such as "(display: grid)"
+ * \return true if the condition holds
+ */
+bool html_layout_css_supports(const char *condition);
+
+/**
  * Get the size to draw a background image at, from background-size.
  *
  * \param style        Style giving the background-size

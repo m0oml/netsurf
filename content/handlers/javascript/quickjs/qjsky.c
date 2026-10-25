@@ -1343,6 +1343,34 @@ qjsky_native_style(JSContext *jctx,
 
 
 /**
+ * Native: __netsurf_css_supports(condition), whether a CSS supports
+ * condition, such as "(display: grid)", holds.
+ */
+static JSValue
+qjsky_native_css_supports(JSContext *jctx,
+			  JSValueConst this_val,
+			  int argc,
+			  JSValueConst *argv)
+{
+	const char *condition;
+	bool supported;
+
+	if (argc < 1) {
+		return JS_FALSE;
+	}
+
+	condition = JS_ToCString(jctx, argv[0]);
+	if (condition == NULL) {
+		return JS_EXCEPTION;
+	}
+	supported = html_layout_css_supports(condition);
+	JS_FreeCString(jctx, condition);
+
+	return JS_NewBool(jctx, supported);
+}
+
+
+/**
  * Native: scroll the window to a position in the document.
  */
 static JSValue
@@ -1750,6 +1778,7 @@ static const JSCFunctionListEntry qjsky_native_funcs[] = {
 	JS_CFUNC_DEF("__netsurf_geometry", 1, qjsky_native_geometry),
 	JS_CFUNC_DEF("__netsurf_viewport", 0, qjsky_native_viewport),
 	JS_CFUNC_DEF("__netsurf_style", 2, qjsky_native_style),
+	JS_CFUNC_DEF("__netsurf_css_supports", 1, qjsky_native_css_supports),
 	JS_CFUNC_DEF("__netsurf_scroll_to", 2, qjsky_native_scroll_to),
 	JS_CFUNC_DEF("__netsurf_fetch", 7, qjsky_native_fetch),
 	JS_CFUNC_DEF("__netsurf_fetch_abort", 1, qjsky_native_fetch_abort),
