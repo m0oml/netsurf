@@ -62,6 +62,7 @@ struct flex_item_data {
 	int target_main_size;
 	int base_size;
 	int main_size;
+	int auto_min_main; /**< automatic minimum main size, with margins */
 	size_t line;
 
 	bool freeze;
@@ -250,6 +251,44 @@ static bool layout_flex_item(
 }
 
 /**
+ * Find the automatic minimum height of an item in a column.
+ *
+ * An item may not shrink below its content, unless it scrolls or has
+ * a minimum height of its own.  The height is the item's laid out
+ * height, which is its content's unless it has a height set, in which
+ * case it may not shrink below that unless it is empty.
+ *
+ * \param b  the item, laid out
+ * \return the automatic minimum height
+ */
+static inline int layout_flex__auto_min_height(const struct box *b)
+{
+	css_fixed length = 0;
+	css_unit unit = CSS_UNIT_PX;
+
+	if (css_computed_overflow_y(b->style) != CSS_OVERFLOW_VISIBLE) {
+		return 0;
+	}
+
+	/* libcss gives an automatic minimum height as zero, unless the
+	 * item is itself a flex container, so zero is taken as automatic */
+	if (css_computed_min_height(b->style, &length, &unit) ==
+			CSS_MIN_HEIGHT_SET && length != 0) {
+		return 0;
+	}
+
+	/* a height set on an item with no content does not stop it
+	 * shrinking */
+	if (b->children == NULL && b->object == NULL &&
+			css_computed_height(b->style, &length, &unit) ==
+			CSS_HEIGHT_SET) {
+		return 0;
+	}
+
+	return b->height;
+}
+
+/**
  * Calculate an item's base and target main sizes.
  *
  * \param[in] ctx              Flex layout context
@@ -272,9 +311,18 @@ static inline bool layout_flex__base_and_main_sizes(
 
 	if (item->basis == CSS_FLEX_BASIS_SET) {
 		if (item->basis_unit == CSS_UNIT_PCT) {
-			item->base_size = FPCT_OF_INT_TOINT(
-					item->basis_length,
-					available_width);
+			/* a percentage of the container's main size, which
+			 * is treated as content when that is indefinite */
+			int reference = ctx->horizontal ?
+					available_width : ctx->available_main;
+
+			if (reference == AUTO || reference == UNKNOWN_WIDTH) {
+				item->base_size = AUTO;
+			} else {
+				item->base_size = FPCT_OF_INT_TOINT(
+						item->basis_length,
+						reference);
+			}
 		} else {
 			item->base_size = FIXTOINT(css_unit_len2device_px(
 					b->style, ctx->unit_len_ctx,
@@ -306,6 +354,13 @@ static inline bool layout_flex__base_and_main_sizes(
 		} else {
 			item->base_size = content_max_width - delta_outer_main;
 		}
+	}
+
+	if (ctx->horizontal) {
+		item->auto_min_main = b->min_width;
+	} else {
+		item->auto_min_main = layout_flex__auto_min_height(b) +
+				delta_outer_main;
 	}
 
 	item->base_size += delta_outer_main;
@@ -591,11 +646,11 @@ static inline int layout_flex__get_min_max_violations(
 					item->min_main);
 		}
 
-		if (target_main_size < item->box->min_width) {
-			target_main_size = item->box->min_width;
+		if (target_main_size < item->auto_min_main) {
+			target_main_size = item->auto_min_main;
 			item->min_violation = true;
-			NSLOG(flex, DEEPDEBUG, "Violation: box min_width: %i",
-					item->box->min_width);
+			NSLOG(flex, DEEPDEBUG, "Violation: automatic minimum: %i",
+					item->auto_min_main);
 		}
 
 		if (target_main_size < 0) {
@@ -890,6 +945,11 @@ static bool layout_flex__place_line_items_main(
 			if (!layout_flex_item(ctx, item, b->width)) {
 				return false;
 			}
+		} else if (!lh__box_is_absolute(b)) {
+			/* the item was laid out to find its base size, so
+			 * only its height changes */
+			b->height = item->target_main_size -
+					lh__delta_outer_height(b);
 		}
 
 		box_size_main = lh__box_size_main(ctx->horizontal, b);
