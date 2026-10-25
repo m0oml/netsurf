@@ -881,7 +881,6 @@
       return null;
     },
     get activeElement() { return this.body; },
-    get currentScript() { return null; },
     get hidden() { return false; },
     get visibilityState() { return "visible"; },
     get scrollingElement() { return this.documentElement; },
@@ -4738,30 +4737,6 @@
     clearTimeout(id);
   };
 
-  /* Selection */
-
-  /** \todo track the selection */
-  global.getSelection = function getSelection() {
-    return {
-      rangeCount: 0,
-      isCollapsed: true,
-      type: "None",
-      anchorNode: null,
-      focusNode: null,
-      anchorOffset: 0,
-      focusOffset: 0,
-      toString: () => "",
-      removeAllRanges() {},
-      addRange() {},
-      removeRange() {},
-      empty() {},
-      getRangeAt() {
-        throw domError("IndexSizeError", "no range");
-      }
-    };
-  };
-  global.document.getSelection = global.getSelection;
-
   /* Message channels */
 
   class MessagePort extends EventTarget {
@@ -4988,5 +4963,1324 @@
     }
     Object.defineProperty(Intl, Symbol.toStringTag, { value: "Intl" });
     defineGlobal("Intl", Intl);
+  }
+  /* Tree queries which the bindings leave without a result */
+  defineMethods(Node.prototype, {
+    contains(other) {
+      for (let n = other; n; n = n.parentNode) {
+        if (n === this) {
+          return true;
+        }
+      }
+      return false;
+    },
+    getRootNode() {
+      let n = this;
+      while (n.parentNode) {
+        n = n.parentNode;
+      }
+      return n;
+    }
+  });
+  defineAccessors(Node.prototype, {
+    get isConnected() {
+      let n = this;
+      while (n.parentNode) {
+        n = n.parentNode;
+      }
+      return n.nodeType === 9;
+    }
+  });
+
+  /* Script being run
+   *
+   * The parser runs a script as soon as it is in the tree, so while the
+   * document is loading the running script is the last one.
+   */
+  defineAccessors(Document.prototype, {
+    get currentScript() {
+      if (this.readyState !== "loading") {
+        return null;
+      }
+      const scripts = this.getElementsByTagName("script");
+      return scripts.length > 0 ? scripts[scripts.length - 1] : null;
+    }
+  });
+
+  /* Media elements, which the bindings make plain elements
+   *
+   * Nothing can be played, so the elements have the state of one which
+   * has no usable source.
+   */
+  {
+    const mediaTags = new Set(["VIDEO", "AUDIO"]);
+    const srcTags = new Set(["VIDEO", "AUDIO", "SOURCE", "TRACK"]);
+    const own = (el, name, value) => Object.defineProperty(el, name, {
+      value, writable: true, configurable: true, enumerable: true
+    });
+    const guarded = (tags, name, get, set) => {
+      Object.defineProperty(HTMLElement.prototype, name, {
+        get() { return tags.has(this.tagName) ? get.call(this) : undefined; },
+        set(value) {
+          if (tags.has(this.tagName) && set) {
+            set.call(this, value);
+          } else {
+            own(this, name, value);
+          }
+        },
+        enumerable: true,
+        configurable: true
+      });
+    };
+    const attr = (name) => [
+      function () { return this.getAttribute(name) || ""; },
+      function (v) { this.setAttribute(name, String(v)); }
+    ];
+    const flag = (name) => [
+      function () { return this.hasAttribute(name); },
+      function (v) { if (v) { this.setAttribute(name, ""); } else { this.removeAttribute(name); } }
+    ];
+    const state = new WeakMap();
+    const slot = (el, name, initial) => {
+      const s = state.get(el);
+      return s && name in s ? s[name] : initial;
+    };
+    const setSlot = (el, name, value) => {
+      let s = state.get(el);
+      if (!s) {
+        s = {};
+        state.set(el, s);
+      }
+      s[name] = value;
+    };
+
+    guarded(srcTags, "src", function () { return resolveUrl(this, this.getAttribute("src")); },
+            function (v) { this.setAttribute("src", String(v)); });
+    guarded(new Set(["VIDEO"]), "poster", function () { return resolveUrl(this, this.getAttribute("poster")); },
+            function (v) { this.setAttribute("poster", String(v)); });
+    guarded(mediaTags, "preload", ...attr("preload"));
+    guarded(mediaTags, "autoplay", ...flag("autoplay"));
+    guarded(mediaTags, "loop", ...flag("loop"));
+    guarded(mediaTags, "controls", ...flag("controls"));
+    guarded(mediaTags, "muted", ...flag("muted"));
+    guarded(mediaTags, "paused", () => true);
+    guarded(mediaTags, "ended", () => false);
+    guarded(mediaTags, "seeking", () => false);
+    guarded(mediaTags, "readyState", () => 0);
+    guarded(mediaTags, "networkState", () => 3);
+    guarded(mediaTags, "duration", () => NaN);
+    guarded(mediaTags, "videoWidth", () => 0);
+    guarded(mediaTags, "videoHeight", () => 0);
+    guarded(mediaTags, "error", () => null);
+    guarded(mediaTags, "currentSrc", () => "");
+    guarded(mediaTags, "currentTime", function () { return slot(this, "time", 0); },
+            function (v) { setSlot(this, "time", Number(v) || 0); });
+    guarded(mediaTags, "volume", function () { return slot(this, "volume", 1); },
+            function (v) { setSlot(this, "volume", Math.min(1, Math.max(0, Number(v) || 0))); });
+    guarded(mediaTags, "playbackRate", function () { return slot(this, "rate", 1); },
+            function (v) { setSlot(this, "rate", Number(v) || 1); });
+
+    const mediaMethod = (name, fn) => {
+      Object.defineProperty(HTMLElement.prototype, name, {
+        value(...args) {
+          if (!mediaTags.has(this.tagName)) {
+            throw new TypeError(`${name} is not a function`);
+          }
+          return fn.apply(this, args);
+        },
+        writable: true, configurable: true, enumerable: true
+      });
+    };
+    mediaMethod("canPlayType", () => "");
+    mediaMethod("load", () => {});
+    mediaMethod("pause", () => {});
+    mediaMethod("play", () => Promise.reject(domError("NotSupportedError", "Media playback is not supported")));
+  }
+
+  /* Style sheets
+   *
+   * A sheet is the text of its style element, parsed into rules when it is
+   * used and written back to the element when the rules change.
+   */
+  {
+    const stripComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, "");
+    const kebab = (name) => name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+
+    /* split text at the characters which end a statement outside of
+     * brackets and strings */
+    const splitTop = (text, separator) => {
+      const out = [];
+      let depth = 0, quote = null, start = 0;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (quote) {
+          if (c === "\\") { i++; } else if (c === quote) { quote = null; }
+        } else if (c === '"' || c === "'") {
+          quote = c;
+        } else if (c === "(" || c === "[") {
+          depth++;
+        } else if (c === ")" || c === "]") {
+          depth--;
+        } else if (c === separator && depth <= 0) {
+          out.push(text.slice(start, i));
+          start = i + 1;
+        }
+      }
+      out.push(text.slice(start));
+      return out;
+    };
+
+    /* split a sheet or a block into its rules' text */
+    const splitRules = (text) => {
+      const out = [];
+      let depth = 0, quote = null, start = 0, paren = 0;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (quote) {
+          if (c === "\\") { i++; } else if (c === quote) { quote = null; }
+        } else if (c === '"' || c === "'") {
+          quote = c;
+        } else if (c === "(") {
+          paren++;
+        } else if (c === ")") {
+          paren--;
+        } else if (c === "{") {
+          depth++;
+        } else if (c === "}") {
+          depth--;
+          if (depth === 0) {
+            out.push(text.slice(start, i + 1).trim());
+            start = i + 1;
+          }
+        } else if (c === ";" && depth === 0 && paren <= 0) {
+          const statement = text.slice(start, i + 1).trim();
+          if (statement !== ";") {
+            out.push(statement);
+          }
+          start = i + 1;
+        }
+      }
+      const rest = text.slice(start).trim();
+      if (rest !== "") {
+        out.push(rest);
+      }
+      return out.filter((r) => r !== "");
+    };
+
+    class CSSStyleDeclaration {
+      constructor() {
+        throw new TypeError("Illegal constructor");
+      }
+    }
+    if (typeof global.CSSStyleDeclaration !== "function") {
+      defineGlobal("CSSStyleDeclaration", CSSStyleDeclaration);
+    }
+
+    const declarationMethods = {
+      getPropertyValue(name) {
+        const e = this.__map.get(String(name).toLowerCase());
+        return e ? e.value : "";
+      },
+      getPropertyPriority(name) {
+        const e = this.__map.get(String(name).toLowerCase());
+        return e && e.important ? "important" : "";
+      },
+      setProperty(name, value, priority = "") {
+        name = String(name).toLowerCase();
+        if (value === null || value === "") {
+          this.__map.delete(name);
+        } else {
+          this.__map.set(name, { value: String(value), important: priority === "important" });
+        }
+        this.__changed();
+      },
+      removeProperty(name) {
+        name = String(name).toLowerCase();
+        const old = this.getPropertyValue(name);
+        this.__map.delete(name);
+        this.__changed();
+        return old;
+      },
+      item(i) { return Array.from(this.__map.keys())[i] || ""; }
+    };
+
+    /* a declaration block, whose camel case properties are the CSS ones */
+    const makeDeclaration = (text, changed) => {
+      const target = Object.create(global.CSSStyleDeclaration.prototype);
+      const map = new Map();
+      const parse = (source) => {
+        map.clear();
+        for (const part of splitTop(stripComments(source), ";")) {
+          const colon = part.indexOf(":");
+          if (colon < 0) {
+            continue;
+          }
+          const name = part.slice(0, colon).trim().toLowerCase();
+          let value = part.slice(colon + 1).trim();
+          const important = /\s*!\s*important$/i.test(value);
+          value = value.replace(/\s*!\s*important$/i, "");
+          if (name !== "") {
+            map.set(name, { value, important });
+          }
+        }
+      };
+      parse(text);
+      const serialize = () => Array.from(map, ([n, e]) => `${n}: ${e.value}${e.important ? " !important" : ""};`).join(" ");
+      Object.defineProperties(target, {
+        __map: { value: map },
+        __changed: { value: changed },
+        __serialize: { value: serialize },
+        cssText: {
+          get: serialize,
+          set(v) { parse(String(v)); changed(); },
+          enumerable: true
+        },
+        length: { get() { return map.size; }, enumerable: true }
+      });
+      for (const name of Object.keys(declarationMethods)) {
+        Object.defineProperty(target, name, { value: declarationMethods[name] });
+      }
+      return new Proxy(target, {
+        get(obj, prop, receiver) {
+          if (typeof prop !== "string" || prop in obj) {
+            return Reflect.get(obj, prop, receiver);
+          }
+          if (/^\d+$/.test(prop)) {
+            return obj.item(Number(prop));
+          }
+          return obj.getPropertyValue(prop.startsWith("--") ? prop : kebab(prop));
+        },
+        set(obj, prop, value, receiver) {
+          if (typeof prop !== "string" || prop in obj) {
+            return Reflect.set(obj, prop, value, receiver);
+          }
+          obj.setProperty(prop.startsWith("--") ? prop : kebab(prop), value);
+          return true;
+        }
+      });
+    };
+
+    class CSSRule {
+      constructor() {
+        throw new TypeError("Illegal constructor");
+      }
+    }
+    for (const [name, value] of Object.entries({
+      STYLE_RULE: 1, CHARSET_RULE: 2, IMPORT_RULE: 3, MEDIA_RULE: 4, FONT_FACE_RULE: 5,
+      PAGE_RULE: 6, KEYFRAMES_RULE: 7, KEYFRAME_RULE: 8, NAMESPACE_RULE: 10, SUPPORTS_RULE: 12
+    })) {
+      Object.defineProperty(CSSRule, name, { value, enumerable: true });
+      Object.defineProperty(CSSRule.prototype, name, { value, enumerable: true });
+    }
+    class CSSStyleRule extends CSSRule {}
+    class CSSGroupingRule extends CSSRule {}
+    class CSSMediaRule extends CSSGroupingRule {}
+    class CSSSupportsRule extends CSSGroupingRule {}
+    class CSSImportRule extends CSSRule {}
+    class CSSFontFaceRule extends CSSRule {}
+    class CSSKeyframesRule extends CSSGroupingRule {}
+    class CSSKeyframeRule extends CSSRule {}
+    class CSSNamespaceRule extends CSSRule {}
+    class CSSCharsetRule extends CSSRule {}
+    class CSSPageRule extends CSSRule {}
+    for (const [name, ctor] of Object.entries({
+      CSSRule, CSSStyleRule, CSSGroupingRule, CSSMediaRule, CSSSupportsRule, CSSImportRule,
+      CSSFontFaceRule, CSSKeyframesRule, CSSKeyframeRule, CSSNamespaceRule, CSSCharsetRule, CSSPageRule
+    })) {
+      defineGlobal(name, ctor);
+    }
+
+    const atRuleTypes = {
+      media: [4, CSSMediaRule], supports: [12, CSSSupportsRule], import: [3, CSSImportRule],
+      "font-face": [5, CSSFontFaceRule], keyframes: [7, CSSKeyframesRule],
+      "-webkit-keyframes": [7, CSSKeyframesRule], namespace: [10, CSSNamespaceRule],
+      charset: [2, CSSCharsetRule], page: [6, CSSPageRule]
+    };
+
+    /* the rules in a block, which is a sheet or a grouping rule */
+    const makeRuleList = (owner, notify) => {
+      const list = [];
+      list.item = function (i) { return this[i] || null; };
+      list.__owner = owner;
+      list.__notify = notify;
+      return list;
+    };
+
+    const makeRule = (text, parentSheet, parentRule, notify) => {
+      let rule;
+      const open = text.indexOf("{");
+      const close = text.lastIndexOf("}");
+      const hasBlock = open >= 0 && close > open && text.trimEnd().endsWith("}");
+      const prelude = (hasBlock ? text.slice(0, open) : text.replace(/;$/, "")).trim();
+      const body = hasBlock ? text.slice(open + 1, close) : "";
+      if (text.startsWith("@")) {
+        const name = /^@([\w-]+)/.exec(text)[1].toLowerCase();
+        const [type, ctor] = atRuleTypes[name] || [0, CSSRule];
+        rule = Object.create(ctor.prototype);
+        Object.defineProperty(rule, "type", { value: type, enumerable: true });
+        const params = prelude.replace(/^@[\w-]+\s*/, "");
+        if (name === "media" || name === "supports") {
+          const rules = makeRuleList(rule, notify);
+          for (const r of splitRules(stripComments(body))) {
+            rules.push(makeRule(r, parentSheet, rule, notify));
+          }
+          Object.defineProperties(rule, {
+            cssRules: { value: rules, enumerable: true },
+            conditionText: { value: params, enumerable: true },
+            media: { value: { mediaText: params }, enumerable: true }
+          });
+          defineMethods(rule, {
+            insertRule(t, index = 0) { return insertInto(rules, t, index, parentSheet, rule); },
+            deleteRule(index) { deleteFrom(rules, index); }
+          });
+          Object.defineProperty(rule, "cssText", {
+            get() {
+              return `@${name} ${params} {\n${Array.from(rules, (r) => "  " + r.cssText).join("\n")}\n}`;
+            }, enumerable: true
+          });
+        } else if (name === "font-face" || name === "page") {
+          const style = makeDeclaration(body, notify);
+          Object.defineProperties(rule, {
+            style: { value: style, enumerable: true },
+            cssText: { get() { return `@${name} { ${style.cssText} }`; }, enumerable: true }
+          });
+        } else if (hasBlock) {
+          Object.defineProperties(rule, {
+            name: { value: params, enumerable: true },
+            cssText: { get() { return text; }, enumerable: true }
+          });
+        } else {
+          Object.defineProperties(rule, {
+            href: { value: (/url\(\s*["']?([^"')]*)/.exec(params) || /["']([^"']*)/.exec(params) || [])[1] || "", enumerable: true },
+            cssText: { get() { return text; }, enumerable: true }
+          });
+        }
+      } else {
+        rule = Object.create(CSSStyleRule.prototype);
+        let selector = prelude;
+        const style = makeDeclaration(body, notify);
+        Object.defineProperties(rule, {
+          type: { value: 1, enumerable: true },
+          selectorText: {
+            get() { return selector; },
+            set(v) { selector = String(v); notify(); },
+            enumerable: true
+          },
+          style: { value: style, enumerable: true },
+          cssText: { get() { return `${selector} { ${style.cssText} }`; }, enumerable: true }
+        });
+      }
+      Object.defineProperties(rule, {
+        parentStyleSheet: { value: parentSheet, enumerable: true },
+        parentRule: { value: parentRule, enumerable: true }
+      });
+      return rule;
+    };
+
+    const insertInto = (rules, text, index, sheet, parentRule) => {
+      text = String(text).trim();
+      if (index < 0 || index > rules.length) {
+        throw domError("IndexSizeError", "The index provided is out of range");
+      }
+      if (text === "" || splitRules(stripComments(text)).length !== 1) {
+        throw domError("SyntaxError", "Failed to parse the rule");
+      }
+      rules.splice(index, 0, makeRule(text, sheet, parentRule, rules.__notify));
+      rules.__notify();
+      return index;
+    };
+    const deleteFrom = (rules, index) => {
+      if (!(index >= 0 && index < rules.length)) {
+        throw domError("IndexSizeError", "The index provided is out of range");
+      }
+      rules.splice(index, 1);
+      rules.__notify();
+    };
+
+    const sheets = new WeakMap();
+    const adoptedMarker = "data-netsurf-adopted";
+
+    class CSSStyleSheet {
+      #node;
+      #text = null;
+      #rules = null;
+      #constructed;
+
+      constructor(options) {
+        if (new.target === undefined) {
+          throw new TypeError("Please use the 'new' operator");
+        }
+        this.#node = null;
+        this.#constructed = true;
+        this.#text = "";
+        this.disabled = false;
+        void options;
+      }
+
+      /* the sheet of a style or link element */
+      static __of(node) {
+        const sheet = new CSSStyleSheet();
+        sheet.#node = node;
+        sheet.#constructed = false;
+        sheet.#text = null;
+        return sheet;
+      }
+
+      /* the element which holds the text of the sheet, if there is one */
+      get ownerNode() { return this.#constructed ? null : this.#node; }
+      get href() {
+        return !this.#constructed && this.#node.tagName === "LINK" ? this.#node.href : null;
+      }
+      get type() { return "text/css"; }
+      get title() { return this.#constructed ? null : this.#node.getAttribute("title"); }
+      get media() { return { mediaText: this.#constructed ? "" : this.#node.getAttribute("media") || "" }; }
+      get parentStyleSheet() { return null; }
+      get ownerRule() { return null; }
+
+      #source() {
+        if (this.#node && this.#node.tagName === "STYLE") {
+          return this.#node.textContent;
+        }
+        return this.#text || "";
+      }
+
+      #sync() {
+        const text = Array.from(this.#rules, (r) => r.cssText).join("\n");
+        this.#text = text;
+        let node = this.#node;
+        if (node && node.tagName === "LINK") {
+          /* the text of a linked sheet is not available, so the rules
+           * which are added go in an element of their own */
+          if (!node.__rulesNode) {
+            const aux = global.document.createElement("style");
+            aux.setAttribute(adoptedMarker, "");
+            (global.document.head || global.document.documentElement).appendChild(aux);
+            Object.defineProperty(node, "__rulesNode", { value: aux });
+          }
+          node = node.__rulesNode;
+        }
+        if (node) {
+          this.__written = text;
+          node.textContent = text;
+        }
+      }
+
+      get cssRules() {
+        const source = this.#source();
+        if (this.#rules === null || (this.#node && this.#node.tagName === "STYLE" && source !== this.__written)) {
+          this.#rules = makeRuleList(this, () => this.#sync());
+          this.__written = source;
+          for (const r of splitRules(stripComments(source))) {
+            this.#rules.push(makeRule(r, this, null, this.#rules.__notify));
+          }
+        }
+        return this.#rules;
+      }
+      get rules() { return this.cssRules; }
+
+      insertRule(text, index = 0) {
+        return insertInto(this.cssRules, text, index, this, null);
+      }
+      deleteRule(index) { deleteFrom(this.cssRules, index); }
+      addRule(selector, style, index) {
+        const rules = this.cssRules;
+        insertInto(rules, `${selector} { ${style} }`, index === undefined ? rules.length : index, this, null);
+        return -1;
+      }
+      removeRule(index = 0) { this.deleteRule(index); }
+
+      replaceSync(text) {
+        this.#text = String(text);
+        this.#rules = null;
+        this.cssRules;
+        this.#sync();
+      }
+      replace(text) {
+        this.replaceSync(text);
+        return Promise.resolve(this);
+      }
+
+      /* give an adopted sheet an element, so that its rules apply */
+      __adopt() {
+        if (this.#node === null) {
+          const style = global.document.createElement("style");
+          style.setAttribute(adoptedMarker, "");
+          (global.document.head || global.document.documentElement).appendChild(style);
+          this.#node = style;
+          style.textContent = this.#text || "";
+          this.#node.__constructedSheet = true;
+        }
+      }
+    }
+    defineGlobal("CSSStyleSheet", CSSStyleSheet);
+
+    const sheetOf = (node) => {
+      let sheet = sheets.get(node);
+      if (sheet === undefined) {
+        sheet = CSSStyleSheet.__of(node);
+        sheets.set(node, sheet);
+      }
+      return sheet;
+    };
+
+    const isSheetNode = (node) => {
+      if (node.hasAttribute(adoptedMarker)) {
+        return false;
+      }
+      if (node.tagName === "STYLE") {
+        const type = node.getAttribute("type");
+        return type === null || type === "" || type.toLowerCase() === "text/css";
+      }
+      return node.tagName === "LINK" &&
+        /(^|\s)stylesheet(\s|$)/i.test(node.getAttribute("rel") || "");
+    };
+
+    defineAccessors(Document.prototype, {
+      get styleSheets() {
+        const list = Array.from(this.querySelectorAll("style, link"))
+          .filter(isSheetNode).map(sheetOf);
+        list.item = function (i) { return this[i] || null; };
+        return list;
+      },
+      get adoptedStyleSheets() { return adopted.get(this) || []; },
+      set adoptedStyleSheets(value) {
+        const list = Array.from(value);
+        for (const sheet of list) {
+          sheet.__adopt();
+        }
+        adopted.set(this, list);
+      }
+    });
+    const adopted = new WeakMap();
+
+    for (const name of ["HTMLStyleElement", "HTMLLinkElement"]) {
+      const ctor = global[name];
+      if (typeof ctor === "function" && ctor.prototype) {
+        Object.defineProperty(ctor.prototype, "sheet", {
+          get() { return isSheetNode(this) && this.isConnected !== false ? sheetOf(this) : null; },
+          enumerable: true,
+          configurable: true
+        });
+      }
+    }
+  }
+
+  /* Range */
+  {
+    const isCharData = (n) => n.nodeType === 3 || n.nodeType === 4 || n.nodeType === 7 || n.nodeType === 8;
+    const nodeLength = (n) => (isCharData(n) ? n.data.length : n.childNodes.length);
+    const indexOf = (n) => Array.prototype.indexOf.call(n.parentNode.childNodes, n);
+    const rootOf = (n) => {
+      while (n.parentNode) { n = n.parentNode; }
+      return n;
+    };
+    const chain = (n) => {
+      const out = [];
+      for (; n; n = n.parentNode) { out.unshift(n); }
+      return out;
+    };
+    const contains = (a, b) => {
+      for (; b; b = b.parentNode) {
+        if (a === b) { return true; }
+      }
+      return false;
+    };
+
+    /* order of two boundary points, -1 if the first is before the second */
+    const compare = (na, oa, nb, ob) => {
+      if (na === nb) {
+        return oa < ob ? -1 : oa > ob ? 1 : 0;
+      }
+      if (contains(na, nb)) {
+        let c = nb;
+        while (c.parentNode !== na) { c = c.parentNode; }
+        return indexOf(c) < oa ? 1 : -1;
+      }
+      if (contains(nb, na)) {
+        let c = na;
+        while (c.parentNode !== nb) { c = c.parentNode; }
+        return indexOf(c) < ob ? -1 : 1;
+      }
+      const a = chain(na), b = chain(nb);
+      let i = 0;
+      while (a[i] === b[i]) { i++; }
+      if (!a[i] || !b[i]) {
+        return 0;
+      }
+      return indexOf(a[i]) < indexOf(b[i]) ? -1 : 1;
+    };
+
+    const checkNode = (node, offset) => {
+      if (node.nodeType === 10) {
+        throw domError("InvalidNodeTypeError", "The node is a doctype");
+      }
+      if (offset < 0 || offset > nodeLength(node)) {
+        throw domError("IndexSizeError", "The offset is out of range");
+      }
+    };
+
+    class Range {
+      #sc = global.document;
+      #so = 0;
+      #ec = global.document;
+      #eo = 0;
+
+      get startContainer() { return this.#sc; }
+      get startOffset() { return this.#so; }
+      get endContainer() { return this.#ec; }
+      get endOffset() { return this.#eo; }
+      get collapsed() { return this.#sc === this.#ec && this.#so === this.#eo; }
+      get commonAncestorContainer() {
+        let c = this.#sc;
+        while (!contains(c, this.#ec)) { c = c.parentNode; }
+        return c;
+      }
+
+      setStart(node, offset) {
+        checkNode(node, offset);
+        this.#sc = node;
+        this.#so = offset;
+        if (rootOf(node) !== rootOf(this.#ec) || compare(node, offset, this.#ec, this.#eo) > 0) {
+          this.#ec = node;
+          this.#eo = offset;
+        }
+      }
+      setEnd(node, offset) {
+        checkNode(node, offset);
+        this.#ec = node;
+        this.#eo = offset;
+        if (rootOf(node) !== rootOf(this.#sc) || compare(node, offset, this.#sc, this.#so) < 0) {
+          this.#sc = node;
+          this.#so = offset;
+        }
+      }
+      setStartBefore(node) { this.setStart(node.parentNode, indexOf(node)); }
+      setStartAfter(node) { this.setStart(node.parentNode, indexOf(node) + 1); }
+      setEndBefore(node) { this.setEnd(node.parentNode, indexOf(node)); }
+      setEndAfter(node) { this.setEnd(node.parentNode, indexOf(node) + 1); }
+
+      collapse(toStart = false) {
+        if (toStart) {
+          this.#ec = this.#sc;
+          this.#eo = this.#so;
+        } else {
+          this.#sc = this.#ec;
+          this.#so = this.#eo;
+        }
+      }
+      selectNode(node) {
+        if (!node.parentNode) {
+          throw domError("InvalidNodeTypeError", "The node has no parent");
+        }
+        const index = indexOf(node);
+        this.#sc = this.#ec = node.parentNode;
+        this.#so = index;
+        this.#eo = index + 1;
+      }
+      selectNodeContents(node) {
+        if (node.nodeType === 10) {
+          throw domError("InvalidNodeTypeError", "The node is a doctype");
+        }
+        this.#sc = this.#ec = node;
+        this.#so = 0;
+        this.#eo = nodeLength(node);
+      }
+      cloneRange() {
+        const r = new Range();
+        r.#sc = this.#sc; r.#so = this.#so; r.#ec = this.#ec; r.#eo = this.#eo;
+        return r;
+      }
+      detach() {}
+
+      compareBoundaryPoints(how, other) {
+        const [an, ao, bn, bo] = how === 0 ? [this.#sc, this.#so, other.startContainer, other.startOffset]
+          : how === 1 ? [this.#ec, this.#eo, other.startContainer, other.startOffset]
+          : how === 2 ? [this.#ec, this.#eo, other.endContainer, other.endOffset]
+          : [this.#sc, this.#so, other.endContainer, other.endOffset];
+        return compare(an, ao, bn, bo);
+      }
+      comparePoint(node, offset) {
+        if (compare(node, offset, this.#sc, this.#so) < 0) { return -1; }
+        return compare(node, offset, this.#ec, this.#eo) > 0 ? 1 : 0;
+      }
+      isPointInRange(node, offset) {
+        return rootOf(node) === rootOf(this.#sc) && this.comparePoint(node, offset) === 0;
+      }
+      intersectsNode(node) {
+        if (rootOf(node) !== rootOf(this.#sc) || !node.parentNode) {
+          return rootOf(node) === rootOf(this.#sc);
+        }
+        const i = indexOf(node);
+        return compare(node.parentNode, i, this.#ec, this.#eo) < 0 &&
+          compare(node.parentNode, i + 1, this.#sc, this.#so) > 0;
+      }
+
+      /* the part of the range in the nodes between its ends */
+      #contents(mode) {
+        const frag = mode === "delete" ? null : global.document.createDocumentFragment();
+        const sc = this.#sc, so = this.#so, ec = this.#ec, eo = this.#eo;
+        if (sc === ec && so === eo) {
+          return frag;
+        }
+        if (sc === ec && isCharData(sc)) {
+          if (frag) {
+            const c = sc.cloneNode(false);
+            c.data = sc.data.substring(so, eo);
+            frag.appendChild(c);
+          }
+          if (mode !== "clone") {
+            sc.data = sc.data.slice(0, so) + sc.data.slice(eo);
+          }
+          return frag;
+        }
+        const common = this.commonAncestorContainer;
+        let first = null, last = null;
+        if (!contains(sc, ec)) {
+          first = sc;
+          while (first.parentNode !== common) { first = first.parentNode; }
+        }
+        if (!contains(ec, sc)) {
+          last = ec;
+          while (last.parentNode !== common) { last = last.parentNode; }
+        }
+        const inside = Array.from(common.childNodes).filter((c) =>
+          c !== first && c !== last &&
+          compare(c, 0, sc, so) > 0 && compare(c, nodeLength(c), ec, eo) < 0);
+
+        let newNode, newOffset;
+        if (contains(sc, ec)) {
+          newNode = sc;
+          newOffset = so;
+        } else {
+          let ref = sc;
+          while (!contains(ref.parentNode, ec)) { ref = ref.parentNode; }
+          newNode = ref.parentNode;
+          newOffset = indexOf(ref) + 1;
+        }
+
+        const part = (node, fromStart) => {
+          if (isCharData(node)) {
+            if (frag) {
+              const c = node.cloneNode(false);
+              c.data = fromStart ? node.data.substring(so) : node.data.substring(0, eo);
+              frag.appendChild(c);
+            }
+            if (mode !== "clone") {
+              node.data = fromStart ? node.data.slice(0, so) : node.data.slice(eo);
+            }
+          } else {
+            const sub = new Range();
+            if (fromStart) {
+              sub.setStart(sc, so);
+              sub.setEnd(node, nodeLength(node));
+            } else {
+              sub.setStart(node, 0);
+              sub.setEnd(ec, eo);
+            }
+            if (frag) {
+              const c = node.cloneNode(false);
+              frag.appendChild(c);
+              c.appendChild(sub.#contents(mode));
+            } else {
+              sub.#contents(mode);
+            }
+          }
+        };
+
+        if (first) { part(first, true); }
+        for (const c of inside) {
+          if (mode === "clone") {
+            frag.appendChild(c.cloneNode(true));
+          } else if (frag) {
+            frag.appendChild(c);
+          } else {
+            c.parentNode.removeChild(c);
+          }
+        }
+        if (last) { part(last, false); }
+        if (mode !== "clone") {
+          this.#sc = this.#ec = newNode;
+          this.#so = this.#eo = newOffset;
+        }
+        return frag;
+      }
+      cloneContents() { return this.#contents("clone"); }
+      extractContents() { return this.#contents("extract"); }
+      deleteContents() { this.#contents("delete"); }
+
+      insertNode(node) {
+        let ref;
+        let parent = this.#sc;
+        if (parent.nodeType === 3) {
+          ref = parent.splitText(this.#so);
+          parent = parent.parentNode;
+        } else if (isCharData(parent)) {
+          throw domError("HierarchyRequestError", "Cannot insert in this node");
+        } else {
+          ref = parent.childNodes[this.#so] || null;
+        }
+        const length = node.nodeType === 11 ? node.childNodes.length : 1;
+        const collapsed = this.collapsed;
+        parent.insertBefore(node, ref);
+        const at = ref ? indexOf(ref) : parent.childNodes.length;
+        this.#sc = parent;
+        if (collapsed) {
+          this.#ec = parent;
+          this.#so = at - length;
+          this.#eo = at;
+        }
+      }
+      surroundContents(parent) {
+        const frag = this.extractContents();
+        while (parent.firstChild) { parent.removeChild(parent.firstChild); }
+        this.insertNode(parent);
+        parent.appendChild(frag);
+        this.selectNode(parent);
+      }
+      createContextualFragment(html) {
+        const holder = global.document.createElement("div");
+        holder.innerHTML = String(html);
+        const frag = global.document.createDocumentFragment();
+        while (holder.firstChild) { frag.appendChild(holder.firstChild); }
+        return frag;
+      }
+
+      toString() {
+        const sc = this.#sc, so = this.#so, ec = this.#ec, eo = this.#eo;
+        if (sc === ec && isCharData(sc)) {
+          return sc.nodeType === 3 || sc.nodeType === 4 ? sc.data.substring(so, eo) : "";
+        }
+        let text = "";
+        if (sc.nodeType === 3) {
+          text += sc.data.substring(so);
+        }
+        const walk = (n) => {
+          for (const c of n.childNodes) {
+            if (c.nodeType === 3 || c.nodeType === 4) {
+              if (c !== sc && c !== ec &&
+                  compare(c, 0, sc, so) > 0 && compare(c, c.data.length, ec, eo) < 0) {
+                text += c.data;
+              }
+            } else {
+              walk(c);
+            }
+          }
+        };
+        walk(this.commonAncestorContainer);
+        if (ec.nodeType === 3) {
+          text += ec.data.substring(0, eo);
+        }
+        return text;
+      }
+
+      #element() {
+        const c = this.commonAncestorContainer;
+        return c.nodeType === 1 ? c : c.parentNode;
+      }
+      getBoundingClientRect() {
+        const el = this.#element();
+        return el && el.getBoundingClientRect ? el.getBoundingClientRect() : new DOMRect(0, 0, 0, 0);
+      }
+      getClientRects() {
+        const el = this.#element();
+        return el && el.getClientRects ? el.getClientRects() : [];
+      }
+
+      get [Symbol.toStringTag]() { return "Range"; }
+    }
+    for (const [name, value] of Object.entries({ START_TO_START: 0, START_TO_END: 1, END_TO_END: 2, END_TO_START: 3 })) {
+      Object.defineProperty(Range, name, { value, enumerable: true });
+      Object.defineProperty(Range.prototype, name, { value, enumerable: true });
+    }
+    defineGlobal("Range", Range);
+    defineMethods(Document.prototype, {
+      createRange() { return new Range(); }
+    });
+
+    /* Selection, which is only what script sets */
+    let current = null;
+    const selection = {
+      get rangeCount() { return current ? 1 : 0; },
+      get isCollapsed() { return !current || current.collapsed; },
+      get type() { return current ? (current.collapsed ? "Caret" : "Range") : "None"; },
+      get anchorNode() { return current ? current.startContainer : null; },
+      get focusNode() { return current ? current.endContainer : null; },
+      get anchorOffset() { return current ? current.startOffset : 0; },
+      get focusOffset() { return current ? current.endOffset : 0; },
+      toString() { return current ? current.toString() : ""; },
+      removeAllRanges() { current = null; },
+      empty() { current = null; },
+      addRange(range) { current = range; },
+      removeRange(range) { if (current === range) { current = null; } },
+      getRangeAt(i) {
+        if (!current || i !== 0) {
+          throw domError("IndexSizeError", "no range");
+        }
+        return current;
+      },
+      collapse(node, offset = 0) {
+        current = new Range();
+        current.setStart(node, offset);
+      },
+      selectAllChildren(node) {
+        current = new Range();
+        current.selectNodeContents(node);
+      },
+      containsNode(node) { return !!current && current.intersectsNode(node); }
+    };
+    global.getSelection = function getSelection() { return selection; };
+    global.document.getSelection = global.getSelection;
+  }
+
+  /* Custom elements */
+  {
+    const nativeCreate = Document.prototype.createElement;
+    const registry = new Map();
+    const constructors = new Map();
+    const pending = new Map();
+    const upgraded = new WeakSet();
+    const connected = new WeakSet();
+    const definitions = new WeakMap();
+    let upgrading = null;
+    let installed = false;
+
+    const reserved = new Set(["annotation-xml", "color-profile", "font-face", "font-face-src",
+      "font-face-uri", "font-face-format", "font-face-name", "missing-glyph"]);
+    const validName = (name) => name === name.toLowerCase() && !reserved.has(name) &&
+      /^[a-z][a-z0-9._·À-￿-]*-[a-z0-9._·À-￿-]*$/.test(name);
+
+    /* the constructor of HTMLElement makes the element of a custom one */
+    {
+      const Native = global.HTMLElement;
+      const ctor = function HTMLElement() {
+        if (!new.target) {
+          throw new TypeError("Failed to construct 'HTMLElement': Please use the 'new' operator");
+        }
+        let el;
+        if (upgrading !== null) {
+          el = upgrading;
+          upgrading = null;
+        } else {
+          const def = constructors.get(new.target);
+          if (!def) {
+            throw new TypeError("Illegal constructor");
+          }
+          el = nativeCreate.call(global.document, def.name);
+        }
+        Object.setPrototypeOf(el, new.target.prototype);
+        return el;
+      };
+      Object.setPrototypeOf(ctor, Object.getPrototypeOf(Native));
+      for (const key of Object.getOwnPropertyNames(Native)) {
+        if (key !== "prototype" && key !== "length" && key !== "name") {
+          Object.defineProperty(ctor, key, Object.getOwnPropertyDescriptor(Native, key));
+        }
+      }
+      Object.defineProperty(ctor, "prototype", { value: Native.prototype });
+      Object.defineProperty(Native.prototype, "constructor", {
+        value: ctor, writable: true, configurable: true
+      });
+      defineGlobal("HTMLElement", ctor);
+    }
+
+    const connectedNow = (el) => (el.isConnected !== undefined ? el.isConnected : global.document.documentElement.contains(el));
+
+    const callback = (el, name, ...args) => {
+      const fn = el[name];
+      if (typeof fn === "function") {
+        try {
+          fn.apply(el, args);
+        } catch (e) {
+          if (typeof global.reportError === "function") {
+            global.reportError(e);
+          } else {
+            console.error(e);
+          }
+        }
+      }
+    };
+
+    const connect = (el) => {
+      if (!connected.has(el)) {
+        connected.add(el);
+        callback(el, "connectedCallback");
+      }
+    };
+
+    const upgrade = (el, def) => {
+      if (upgraded.has(el)) {
+        return;
+      }
+      upgraded.add(el);
+      definitions.set(el, def);
+      upgrading = el;
+      try {
+        new def.ctor();
+      } catch (e) {
+        if (typeof global.reportError === "function") {
+          global.reportError(e);
+        } else {
+          console.error(e);
+        }
+      } finally {
+        upgrading = null;
+      }
+      for (const name of def.observed) {
+        const value = el.getAttribute(name);
+        if (value !== null) {
+          callback(el, "attributeChangedCallback", name, null, value);
+        }
+      }
+      if (connectedNow(el)) {
+        connect(el);
+      }
+    };
+
+    /* the elements in a subtree which have a definition */
+    const definedIn = (root) => {
+      const out = [];
+      if (registry.size === 0) {
+        return out;
+      }
+      if (registry.has(root.localName)) {
+        out.push(root);
+      }
+      if (root.querySelectorAll) {
+        const selector = Array.from(registry.keys(), (n) => CSS.escape(n)).join(",");
+        out.push(...root.querySelectorAll(selector));
+      }
+      return out;
+    };
+
+    const onInserted = (event) => {
+      const target = event.target;
+      if (target.nodeType !== 1 || !connectedNow(target)) {
+        return;
+      }
+      for (const el of definedIn(target)) {
+        const def = registry.get(el.localName);
+        if (!upgraded.has(el)) {
+          upgrade(el, def);
+        } else {
+          connect(el);
+        }
+      }
+    };
+    const onRemoved = (event) => {
+      const target = event.target;
+      if (target.nodeType !== 1) {
+        return;
+      }
+      for (const el of definedIn(target)) {
+        if (connected.has(el)) {
+          connected.delete(el);
+          callback(el, "disconnectedCallback");
+        }
+      }
+    };
+
+    const observeAttributes = () => {
+      const proto = global.Element.prototype;
+      const set = proto.setAttribute;
+      const remove = proto.removeAttribute;
+      const watched = (el, name) => {
+        const def = definitions.get(el);
+        return def && def.observed.includes(String(name).toLowerCase()) ? def : null;
+      };
+      Object.defineProperty(proto, "setAttribute", {
+        value(name, value) {
+          if (!watched(this, name)) {
+            return set.call(this, name, value);
+          }
+          const old = this.getAttribute(name);
+          set.call(this, name, value);
+          callback(this, "attributeChangedCallback", String(name).toLowerCase(), old, this.getAttribute(name));
+        },
+        writable: true, configurable: true, enumerable: true
+      });
+      Object.defineProperty(proto, "removeAttribute", {
+        value(name) {
+          if (!watched(this, name)) {
+            return remove.call(this, name);
+          }
+          const old = this.getAttribute(name);
+          remove.call(this, name);
+          if (old !== null) {
+            callback(this, "attributeChangedCallback", String(name).toLowerCase(), old, null);
+          }
+        },
+        writable: true, configurable: true, enumerable: true
+      });
+    };
+
+    /* the elements which are made by script are upgraded when made */
+    const install = () => {
+      installed = true;
+      observeAttributes();
+      Object.defineProperty(Document.prototype, "createElement", {
+        value(name, options) {
+          const el = nativeCreate.call(this, name, options);
+          const def = registry.get(String(name).toLowerCase());
+          if (def && this === global.document) {
+            upgrade(el, def);
+          }
+          return el;
+        },
+        writable: true, configurable: true, enumerable: true
+      });
+      global.document.addEventListener("DOMNodeInserted", onInserted, true);
+      global.document.addEventListener("DOMNodeRemoved", onRemoved, true);
+    };
+
+    class CustomElementRegistry {
+      define(name, ctor, options) {
+        name = String(name);
+        if (typeof ctor !== "function") {
+          throw new TypeError("The constructor is not a constructor");
+        }
+        if (!validName(name)) {
+          throw domError("SyntaxError", `"${name}" is not a valid custom element name`);
+        }
+        if (registry.has(name)) {
+          throw domError("NotSupportedError", `"${name}" has already been defined`);
+        }
+        if (constructors.has(ctor)) {
+          throw domError("NotSupportedError", "The constructor has already been used");
+        }
+        void options;
+        const def = { name, ctor, observed: Array.from(ctor.observedAttributes || [], (a) => String(a).toLowerCase()) };
+        registry.set(name, def);
+        constructors.set(ctor, def);
+        if (!installed) {
+          install();
+        }
+        for (const el of global.document.querySelectorAll(CSS.escape(name))) {
+          upgrade(el, def);
+        }
+        const waiting = pending.get(name);
+        if (waiting) {
+          pending.delete(name);
+          waiting.resolve(ctor);
+        }
+      }
+      get(name) {
+        const def = registry.get(String(name));
+        return def ? def.ctor : undefined;
+      }
+      getName(ctor) {
+        const def = constructors.get(ctor);
+        return def ? def.name : null;
+      }
+      whenDefined(name) {
+        name = String(name);
+        if (!validName(name)) {
+          return Promise.reject(domError("SyntaxError", `"${name}" is not a valid custom element name`));
+        }
+        const def = registry.get(name);
+        if (def) {
+          return Promise.resolve(def.ctor);
+        }
+        let entry = pending.get(name);
+        if (!entry) {
+          entry = {};
+          entry.promise = new Promise((resolve) => { entry.resolve = resolve; });
+          pending.set(name, entry);
+        }
+        return entry.promise;
+      }
+      upgrade(root) {
+        for (const el of definedIn(root)) {
+          if (!upgraded.has(el)) {
+            upgrade(el, registry.get(el.localName));
+          }
+        }
+      }
+      get [Symbol.toStringTag]() { return "CustomElementRegistry"; }
+    }
+    defineGlobal("CustomElementRegistry", CustomElementRegistry);
+    const customElements = new CustomElementRegistry();
+    Object.defineProperty(global, "customElements", {
+      value: customElements, writable: true, enumerable: false, configurable: true
+    });
+
+    /* Shadow trees are not drawn separately, so the content of one is
+     * put in its host.
+     */
+    const shadows = new WeakMap();
+    const rootHosts = new WeakMap();
+    class ShadowRoot {
+      constructor() {
+        throw new TypeError("Illegal constructor");
+      }
+      static __make(host, mode) {
+        const root = Object.create(ShadowRoot.prototype);
+        rootHosts.set(root, { host, mode });
+        return root;
+      }
+      get host() { return rootHosts.get(this).host; }
+      get mode() { return rootHosts.get(this).mode; }
+      get delegatesFocus() { return false; }
+      get nodeType() { return 11; }
+      get nodeName() { return "#document-fragment"; }
+      get ownerDocument() { return global.document; }
+      get isConnected() { return this.host.isConnected; }
+      get activeElement() { return null; }
+      get styleSheets() { return []; }
+      get adoptedStyleSheets() { return adoptedOf.get(this) || []; }
+      set adoptedStyleSheets(value) {
+        const list = Array.from(value);
+        for (const sheet of list) {
+          sheet.__adopt();
+        }
+        adoptedOf.set(this, list);
+      }
+      get innerHTML() { return this.host.innerHTML; }
+      set innerHTML(html) { this.host.innerHTML = html; }
+      get textContent() { return this.host.textContent; }
+      set textContent(text) { this.host.textContent = text; }
+      get children() { return this.host.children; }
+      get childNodes() { return this.host.childNodes; }
+      get firstChild() { return this.host.firstChild; }
+      get lastChild() { return this.host.lastChild; }
+      get firstElementChild() { return this.host.firstElementChild; }
+      get lastElementChild() { return this.host.lastElementChild; }
+      get childElementCount() { return this.host.childElementCount; }
+      getElementById(id) { return this.host.querySelector("#" + CSS.escape(String(id))); }
+      getSelection() { return global.getSelection(); }
+    }
+    const adoptedOf = new WeakMap();
+    for (const method of ["appendChild", "insertBefore", "removeChild", "replaceChild", "append",
+                          "prepend", "replaceChildren", "querySelector", "querySelectorAll",
+                          "contains", "hasChildNodes", "addEventListener", "removeEventListener",
+                          "dispatchEvent"]) {
+      Object.defineProperty(ShadowRoot.prototype, method, {
+        value(...args) {
+          const host = this.host;
+          return host[method](...args);
+        },
+        writable: true, configurable: true, enumerable: true
+      });
+    }
+    defineGlobal("ShadowRoot", ShadowRoot);
+
+    if (typeof global.Element.prototype.attachShadow !== "function") {
+      defineMethods(global.Element.prototype, {
+        attachShadow(init) {
+          if (shadows.has(this)) {
+            throw domError("InvalidStateError", "A shadow root is already attached");
+          }
+          const mode = init && init.mode === "closed" ? "closed" : "open";
+          const root = ShadowRoot.__make(this, mode);
+          shadows.set(this, root);
+          return root;
+        }
+      });
+      defineAccessors(global.Element.prototype, {
+        get shadowRoot() {
+          const root = shadows.get(this);
+          return root && root.mode === "open" ? root : null;
+        }
+      });
+    }
   }
 })();
