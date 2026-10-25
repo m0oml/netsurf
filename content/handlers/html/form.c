@@ -1452,6 +1452,25 @@ void form_add_control(struct form *form, struct form_control *control)
 
 
 /* exported interface documented in html/form_internal.h */
+void form_track_loose_control(struct html_content *html,
+		struct form_control *control)
+{
+	if (control->form != NULL || control->loose) {
+		return;
+	}
+
+	control->html = html;
+	control->loose = true;
+	control->prev = NULL;
+	control->next = html->loose_controls;
+	if (html->loose_controls != NULL) {
+		html->loose_controls->prev = control;
+	}
+	html->loose_controls = control;
+}
+
+
+/* exported interface documented in html/form_internal.h */
 void form_free_control(struct form_control *control)
 {
 	struct form_control *c;
@@ -1480,6 +1499,18 @@ void form_free_control(struct form_control *control)
 
 		if (control->data.text.ta != NULL) {
 			textarea_destroy(control->data.text.ta);
+		}
+	}
+
+	/* unlink the control from the content's list of loose controls */
+	if (control->loose) {
+		if (control->prev != NULL) {
+			control->prev->next = control->next;
+		} else if (control->html != NULL) {
+			control->html->loose_controls = control->next;
+		}
+		if (control->next != NULL) {
+			control->next->prev = control->prev;
 		}
 	}
 

@@ -196,6 +196,8 @@ typedef struct html_content {
 	struct content_html_object *object_list;
 	/** Forms, in reverse order to document. */
 	struct form *forms;
+	/** Controls which are not in a form, which nothing else frees. */
+	struct form_control *loose_controls;
 	/** Hash table of imagemaps. */
 	struct imagemap **imagemaps;
 

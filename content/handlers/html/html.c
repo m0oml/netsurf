@@ -1427,6 +1427,11 @@ static void html_destroy(struct content *c)
 		form_free(f);
 	}
 
+	/* Destroy the controls which were not in a form */
+	while (html->loose_controls != NULL) {
+		form_free_control(html->loose_controls);
+	}
+
 	imagemap_destroy(html);
 
 	if (c->refresh)

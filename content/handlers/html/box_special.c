@@ -811,6 +811,7 @@ box_button(dom_node *n,
 		return false;
 
 	gadget->html = content;
+	form_track_loose_control(content, gadget);
 	box->gadget = gadget;
 	box->flags |= IS_REPLACED;
 	gadget->box = box;
@@ -1255,6 +1256,7 @@ box_input(dom_node *n,
 	box->flags |= IS_REPLACED;
 	gadget->box = box;
 	gadget->html = content;
+	form_track_loose_control(content, gadget);
 
 	/* get entry type */
 	err = dom_element_get_attribute(n, corestring_dom_type, &type);
@@ -1680,6 +1682,7 @@ box_select(dom_node *n,
 		return false;
 
 	gadget->html = content;
+	form_track_loose_control(content, gadget);
 
 	/* A control kept from a previous box tree has its options rebuilt
 	 * from the document, where the selection is also kept.
@@ -1846,6 +1849,7 @@ static bool box_textarea(dom_node *n,
 
 	box->flags |= IS_REPLACED;
 	box->gadget->html = content;
+	form_track_loose_control(content, box->gadget);
 	box->gadget->box = box;
 
 	if (!box_input_text(content, box, n))

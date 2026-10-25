@@ -360,8 +360,10 @@ nserror browser_window_destroy_iframes(struct browser_window *bw)
  */
 static void browser_window_recalculate_frameset_internal(struct browser_window *bw)
 {
-	int widths[bw->cols][bw->rows];
-	int heights[bw->cols][bw->rows];
+	/* a frameset with only columns or rows has none of the other, and an
+	 * array may not have no elements */
+	int widths[bw->cols > 0 ? bw->cols : 1][bw->rows > 0 ? bw->rows : 1];
+	int heights[bw->cols > 0 ? bw->cols : 1][bw->rows > 0 ? bw->rows : 1];
 	int bw_width, bw_height;
 	int avail_width, avail_height;
 	int row, row2, col, index;

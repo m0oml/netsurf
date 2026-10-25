@@ -656,10 +656,17 @@ box_construct_element(struct box_construct_ctx *ctx, bool *convert_children)
 		box->styles = NULL;
 		box->style = NULL;
 
-		/* Invalidate associated gadget, if any */
+		/* Invalidate associated gadget, if any.  One in a form is
+		 * freed with the form, but one outside a form is owned by
+		 * its box, which is not kept, so it is freed here. */
 		if (box->gadget != NULL) {
-			box->gadget->box = NULL;
+			struct form_control *gadget = box->gadget;
+
+			gadget->box = NULL;
 			box->gadget = NULL;
+			if (gadget->form == NULL) {
+				form_free_control(gadget);
+			}
 		}
 
 		/* Can't do this, because the lifetimes of boxes and gadgets

@@ -79,6 +79,8 @@ struct form_control {
 	form_control_type type;		/**< Type of control */
 
 	struct form *form;		/**< Containing form */
+	bool loose;			/**< On the content's list of controls
+					 *   outside a form */
 
 	char *name;			/**< Control name */
 	char *value;			/**< Current value of control */
@@ -198,6 +200,19 @@ struct form_control *form_new_control(void *node, form_control_type type);
  * \param control  The control to add
  */
 void form_add_control(struct form *form, struct form_control *control);
+
+
+/**
+ * Keep a control which is not in a form with its content.
+ *
+ * The control is freed with the content, or sooner, if it is freed.  A
+ * control in a form is freed with its form, so is left alone.
+ *
+ * \param html     The content which the control is in
+ * \param control  The control
+ */
+void form_track_loose_control(struct html_content *html,
+		struct form_control *control);
 
 
 /**
