@@ -509,6 +509,39 @@ void html_radii_adjust(struct html_radii *radii, float left, float top,
 bool html_radii_any(const struct html_radii *radii);
 
 /**
+ * Keep what is drawn inside the rounded corners of a box.
+ *
+ * Plotters can only clip to a rectangle, so things drawn while a shape is
+ * on the stack, through html_redraw_clipped(), are drawn in bands of
+ * rows which are inside the corners.  Shapes with no rounded corner are
+ * not kept.
+ *
+ * \param area   rectangle of the shape, in target coordinates
+ * \param radii  radii of its corners
+ * \return true if the shape was kept, and is to be removed with
+ *         html_redraw_clip_pop()
+ */
+bool html_redraw_clip_push(const struct rect *area,
+		const struct html_radii *radii);
+
+/**
+ * Stop keeping what is drawn inside the shape pushed last.
+ */
+void html_redraw_clip_pop(void);
+
+/**
+ * Draw something inside the shapes which are kept.
+ *
+ * \param r   rectangle which is to be drawn in
+ * \param fn  function which draws in a rectangle inside the shapes, and
+ *            is called for each band of rows if r crosses a corner
+ * \param pw  pointer passed to fn
+ * \return false if fn did, true otherwise
+ */
+bool html_redraw_clipped(const struct rect *r,
+		bool (*fn)(const struct rect *band, void *pw), void *pw);
+
+/**
  * Fill a rounded rectangle.
  *
  * \param ctx    current redraw context
@@ -535,6 +568,30 @@ bool html_redraw_rounded_fill(const struct redraw_context *ctx,
  * \return true if successful, false otherwise
  */
 bool html_redraw_rounded_ring(const struct redraw_context *ctx,
+		const struct rect *outer, const struct html_radii *outer_radii,
+		const struct rect *hole, const struct html_radii *hole_radii,
+		colour fill, const struct rect *clip);
+
+
+/**
+ * Fill the part of a rounded ring which is the border on one side.
+ *
+ * The corners are shared between the sides by cutting each corner of the
+ * ring half way round, where the curves of the outer shape and of the hole
+ * are both at the same angle.
+ *
+ * \param ctx          current redraw context
+ * \param side         side of the ring, TOP, RIGHT, BOTTOM or LEFT
+ * \param outer        the rectangle
+ * \param outer_radii  the radii of its corners
+ * \param hole         the hole
+ * \param hole_radii   the radii of its corners
+ * \param fill         colour to fill with
+ * \param clip         clip rectangle
+ * \return true if successful, false otherwise
+ */
+bool html_redraw_rounded_side(const struct redraw_context *ctx,
+		int side,
 		const struct rect *outer, const struct html_radii *outer_radii,
 		const struct rect *hole, const struct html_radii *hole_radii,
 		colour fill, const struct rect *clip);

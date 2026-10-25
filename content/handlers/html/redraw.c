@@ -998,6 +998,53 @@ static bool html_redraw_box_radii(const struct box *box, int x, int y,
 }
 
 
+/** What is drawn in each band of a background which crosses a corner */
+struct html_redraw_band_data {
+	const struct redraw_context *ctx;
+	const plot_style_t *style;	/**< fill of a rectangle */
+	const struct rect *shape;	/**< rounded shape to fill, or NULL */
+	const struct html_radii *radii;	/**< radii of the shape */
+	struct hlcache_handle *content;	/**< content to redraw */
+	struct content_redraw_data *data; /**< how to redraw content */
+	bool failed;			/**< redrawing the content failed */
+};
+
+
+/**
+ * Fill a band of a background.
+ */
+static bool html_redraw_band_fill(const struct rect *band, void *pw)
+{
+	struct html_redraw_band_data *d = pw;
+
+	if (d->shape != NULL) {
+		return html_redraw_rounded_fill(d->ctx, d->shape, d->radii,
+				d->style->fill_colour, band);
+	}
+
+	return d->ctx->plot->rectangle(d->ctx, d->style, band) == NSERROR_OK;
+}
+
+
+/**
+ * Redraw the content of a band of a background.
+ */
+static bool html_redraw_band_content(const struct rect *band, void *pw)
+{
+	struct html_redraw_band_data *d = pw;
+
+	if (d->ctx->plot->clip(d->ctx, band) != NSERROR_OK) {
+		return false;
+	}
+
+	if (content_redraw(d->content, d->data, band, d->ctx) == false) {
+		d->failed = true;
+	}
+
+	return true;
+}
+
+
 static bool html_redraw_background(int x, int y, struct box *box, float scale,
 		const struct rect *clip, colour *background_colour,
 		struct box *background,
@@ -1022,7 +1069,6 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 		.fill_type = PLOT_OP_TYPE_SOLID,
 		.fill_colour = *background_colour,
 	};
-	nserror res;
 
 	if (ctx->background_images == false)
 		return true;
@@ -1160,6 +1206,10 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 			if (plot_colour) {
 				struct rect border_box;
 				struct html_radii radii;
+				struct html_redraw_band_data band = {
+					.ctx = ctx,
+					.style = &pstyle_fill_bg,
+				};
 
 				if (background == box && box->parent != NULL &&
 						clip_to_children == false &&
@@ -1168,18 +1218,16 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 							&border_box, &radii)) {
 					/* rounded corners, where the colour
 					 * shows only inside them */
-					if (!html_redraw_rounded_fill(ctx,
-							&border_box, &radii,
-							pstyle_fill_bg.fill_colour,
-							&r))
-						return false;
-				} else {
-					res = ctx->plot->rectangle(ctx,
-							&pstyle_fill_bg, &r);
-					if (res != NSERROR_OK) {
-						return false;
-					}
+					band.shape = &border_box;
+					band.radii = &radii;
 				}
+
+				/* inside the corners of any box which
+				 * clips what is in it too */
+				if (!html_redraw_clipped(&r,
+						html_redraw_band_fill,
+						&band))
+					return false;
 			}
 		}
 		/* and plot the image */
@@ -1203,11 +1251,15 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 			/* valid clipping rectangles only */
 			if ((r.x0 < r.x1) && (r.y0 < r.y1)) {
 				struct content_redraw_data bg_data;
-
-				res = ctx->plot->clip(ctx, &r);
-				if (res != NSERROR_OK) {
-					return false;
-				}
+				struct html_redraw_band_data band = {
+					.ctx = ctx,
+					.content = background->background,
+					.data = &bg_data,
+				};
+				struct rect border_box;
+				struct html_radii radii;
+				bool kept = false;
+				bool drawn;
 
 				bg_data.x = x;
 				bg_data.y = y;
@@ -1218,9 +1270,26 @@ static bool html_redraw_background(int x, int y, struct box *box, float scale,
 				bg_data.repeat_x = repeat_x;
 				bg_data.repeat_y = repeat_y;
 
-				/* We just continue if redraw fails */
-				content_redraw(background->background,
-						&bg_data, &r, ctx);
+				/* the image is kept inside the corners
+				 * of its own box */
+				if (background == box && box->parent != NULL &&
+						clip_to_children == false &&
+						html_redraw_box_radii(box, ox, oy,
+							scale, unit_len_ctx,
+							&border_box, &radii)) {
+					kept = html_redraw_clip_push(
+							&border_box, &radii);
+				}
+
+				drawn = html_redraw_clipped(&r,
+						html_redraw_band_content,
+						&band);
+				if (kept) {
+					html_redraw_clip_pop();
+				}
+				if (!drawn) {
+					return false;
+				}
 			}
 		}
 
@@ -1688,15 +1757,23 @@ static bool html_redraw_rounded_border(const struct box *box, int x, int y,
 	int top = box->border[TOP].width * scale;
 	int right = box->border[RIGHT].width * scale;
 	int bottom = box->border[BOTTOM].width * scale;
+	bool same = true;
 	unsigned int side;
 
 	for (side = 0; side < 4; side++) {
-		if (box->border[side].width == 0 ||
-		    box->border[side].style != CSS_BORDER_STYLE_SOLID ||
-		    nscss_color_is_transparent(box->border[side].c) ||
-		    box->border[side].width != box->border[0].width ||
-		    box->border[side].c != box->border[0].c) {
+		if (box->border[side].width == 0) {
+			/* a side with no border takes no part */
+			same = false;
+			continue;
+		}
+		if (box->border[side].style != CSS_BORDER_STYLE_SOLID) {
+			/* other styles are drawn square */
 			return false;
+		}
+		if (box->border[side].width != box->border[0].width ||
+		    box->border[side].c != box->border[0].c ||
+		    nscss_color_is_transparent(box->border[0].c)) {
+			same = false;
 		}
 	}
 
@@ -1711,8 +1788,27 @@ static bool html_redraw_rounded_border(const struct box *box, int x, int y,
 
 	html_radii_adjust(&inner, left, top, right, bottom);
 
-	return html_redraw_rounded_ring(ctx, &outer, radii, &hole, &inner,
-			nscss_color_to_ns(box->border[0].c), clip);
+	if (same) {
+		/* all of the ring is one colour */
+		return html_redraw_rounded_ring(ctx, &outer, radii, &hole,
+				&inner, nscss_color_to_ns(box->border[0].c),
+				clip);
+	}
+
+	/* each side has its own part of the ring */
+	for (side = 0; side < 4; side++) {
+		if (box->border[side].width == 0 ||
+		    nscss_color_is_transparent(box->border[side].c)) {
+			continue;
+		}
+		if (!html_redraw_rounded_side(ctx, side, &outer, radii, &hole,
+				&inner,
+				nscss_color_to_ns(box->border[side].c), clip)) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 
@@ -2324,7 +2420,34 @@ bool html_redraw_box(const html_content *html, struct box *box,
 			obj_data.y /= scale;
 		}
 
-		if (!content_redraw(box->object, &obj_data, &r, ctx)) {
+		struct html_redraw_band_data band = {
+			.ctx = ctx,
+			.content = box->object,
+			.data = &obj_data,
+		};
+		struct html_radii inner = radii;
+		struct rect padding_box = {
+			.x0 = x,
+			.y0 = y,
+			.x1 = x + padding_width,
+			.y1 = y + padding_height,
+		};
+		bool kept = false;
+
+		/* what is shown is kept inside the corners of the box */
+		if (rounded) {
+			html_radii_adjust(&inner, border_left, border_top,
+					border_right, border_bottom);
+			kept = html_redraw_clip_push(&padding_box, &inner);
+		}
+		if (!html_redraw_clipped(&r, html_redraw_band_content, &band)) {
+			band.failed = true;
+		}
+		if (kept) {
+			html_redraw_clip_pop();
+		}
+
+		if (band.failed) {
 			/* Show image fail */
 			/* Unicode (U+FFFC) 'OBJECT REPLACEMENT CHARACTER' */
 			const char *obj = "\xef\xbf\xbc";
@@ -2408,8 +2531,32 @@ bool html_redraw_box(const html_content *html, struct box *box,
 			return false;
 
 	} else {
-		if (!html_redraw_box_children(html, box, x_parent, y_parent, &r,
-				scale, current_background_color, ctx))
+		struct rect padding_box = {
+			.x0 = x,
+			.y0 = y,
+			.x1 = x + padding_width,
+			.y1 = y + padding_height,
+		};
+		struct html_radii inner = radii;
+		bool kept = false;
+		bool drawn;
+
+		/* what is in a box which clips it is kept inside its corners */
+		if (rounded && box->parent != NULL &&
+				(overflow_x != CSS_OVERFLOW_VISIBLE ||
+				 overflow_y != CSS_OVERFLOW_VISIBLE)) {
+			html_radii_adjust(&inner, border_left, border_top,
+					border_right, border_bottom);
+			kept = html_redraw_clip_push(&padding_box, &inner);
+		}
+
+		drawn = html_redraw_box_children(html, box, x_parent, y_parent,
+				&r, scale, current_background_color, ctx);
+
+		if (kept) {
+			html_redraw_clip_pop();
+		}
+		if (!drawn)
 			return false;
 	}
 
