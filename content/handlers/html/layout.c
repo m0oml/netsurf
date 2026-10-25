@@ -49,6 +49,7 @@
 #include "utils/nsoption.h"
 #include "utils/corestrings.h"
 #include "utils/nsurl.h"
+#include "utils/utf8.h"
 #include "netsurf/inttypes.h"
 #include "netsurf/content.h"
 #include "netsurf/browser_window.h"
@@ -448,6 +449,107 @@ static inline bool box_has_percentage_max_width(struct box *b)
 }
 
 /**
+ * Find whether a word too long for a line may be broken within it.
+ *
+ * \param style  style of the text
+ * \return true if the text may break between any two characters
+ */
+static bool layout_text_breaks_words(const css_computed_style *style)
+{
+	switch (css_computed_word_break(style)) {
+	case CSS_WORD_BREAK_BREAK_ALL:
+	case CSS_WORD_BREAK_BREAK_WORD:
+		return true;
+	default:
+		break;
+	}
+
+	switch (css_computed_overflow_wrap(style)) {
+	case CSS_OVERFLOW_WRAP_BREAK_WORD:
+	case CSS_OVERFLOW_WRAP_ANYWHERE:
+		return true;
+	default:
+		break;
+	}
+
+	return false;
+}
+
+
+/**
+ * Find whether the breaks within words count for the minimum width.
+ *
+ * overflow-wrap: break-word only breaks a word which would overflow, so
+ * the widest word is still the minimum width, but the others allow the
+ * text to be as narrow as a character.
+ *
+ * \param style  style of the text
+ * \return true if the minimum width is that of a character
+ */
+static bool layout_text_min_is_character(const css_computed_style *style)
+{
+	switch (css_computed_word_break(style)) {
+	case CSS_WORD_BREAK_BREAK_ALL:
+	case CSS_WORD_BREAK_BREAK_WORD:
+		return true;
+	default:
+		break;
+	}
+
+	return css_computed_overflow_wrap(style) == CSS_OVERFLOW_WRAP_ANYWHERE;
+}
+
+
+/**
+ * Find how much of a word fits in a width.
+ *
+ * At least one character is taken, so that each line makes progress.
+ *
+ * \param font_func  font functions
+ * \param fstyle     style of the text
+ * \param text       the word, in UTF-8
+ * \param length     length of the word, in bytes
+ * \param width      width available
+ * \param fit_width  updated to the width of the part which fits
+ * \return length in bytes of the part which fits, at least one character
+ */
+static size_t
+layout_text_fit_characters(const struct gui_layout_table *font_func,
+		const plot_font_style_t *fstyle,
+		const char *text,
+		size_t length,
+		int width,
+		int *fit_width)
+{
+	size_t offset = 0;
+	int x = 0;
+
+	font_func->position(fstyle, text, length, width, &offset, &x);
+	if (offset > length) {
+		offset = length;
+	}
+
+	/* the position found is the character nearest the width, which
+	 * may end beyond it */
+	if (offset > 0) {
+		font_func->width(fstyle, text, offset, &x);
+	}
+	while (offset > 0 && x > width) {
+		offset = utf8_prev(text, offset);
+		font_func->width(fstyle, text, offset, &x);
+	}
+
+	if (offset == 0) {
+		offset = utf8_next(text, length, 0);
+		font_func->width(fstyle, text, offset, &x);
+	}
+
+	*fit_width = x;
+	return offset;
+}
+
+
+/**
  * Calculate minimum and maximum width of a line.
  *
  * \param first       a box in an inline container
@@ -641,13 +743,19 @@ layout_minmax_line(struct box *first,
 				/* If we care what the minimum width is,
 				 * calculate it.  (It's only needed if we're
 				 * shrinking-to-fit.) */
-				/* min = widest single word */
+				/* min = widest single word, or widest
+				 * first character where words may be
+				 * broken anywhere */
+				bool by_character =
+					layout_text_min_is_character(b->style);
 				i = 0;
 				do {
 					for (j = i; j != b->length &&
 							b->text[j] != ' '; j++)
 						;
 					font_func->width(&fstyle, b->text + i,
+							 (by_character && j > i) ?
+							 utf8_next(b->text, j, i) - i :
 							 j - i, &width);
 					if (min < width)
 						min = width;
@@ -2709,6 +2817,22 @@ static int line_height(
 
 
 /**
+ * Check if a box is the end of an inline which takes up no room.
+ *
+ * \param b  the box, or NULL
+ * \return true if b ends an inline and has no padding, border or margin
+ */
+static inline bool layout_inline_end_is_empty(const struct box *b)
+{
+	return b != NULL &&
+			b->type == BOX_INLINE_END &&
+			b->padding[RIGHT] == 0 &&
+			b->border[RIGHT].width == 0 &&
+			b->margin[RIGHT] == 0;
+}
+
+
+/**
  * Check if a box is to be put on a line which is filled up to x.
  *
  * Boxes are put on the line until one goes over its end, but the end of
@@ -2725,11 +2849,7 @@ static inline bool layout_line_box_fits(const struct box *b, int x, int avail)
 		return false;
 	}
 
-	return (x <= avail) ||
-			(b->type == BOX_INLINE_END &&
-			 b->padding[RIGHT] == 0 &&
-			 b->border[RIGHT].width == 0 &&
-			 b->margin[RIGHT] == 0);
+	return (x <= avail) || layout_inline_end_is_empty(b);
 }
 
 
@@ -3062,6 +3182,13 @@ layout_line(struct box *first,
 						CSS_POSITION_FIXED)) {
 			b->x = x + space_after;
 
+		} else if (x > x1 - x0) {
+			/* the empty end of an inline, kept with the box it
+			 * ends, which is not where the line may be split */
+			assert(layout_inline_end_is_empty(b));
+			b->x = x;
+			b->height = b->inline_end->height;
+
 		} else if (lh__box_is_inline_flow(b)) {
 			assert(b->width != UNKNOWN_WIDTH);
 
@@ -3242,6 +3369,7 @@ layout_line(struct box *first,
 
 	if (x1 - x0 < x && split_box) {
 		/* the last box went over the end */
+		struct box *line_end = b;
 		size_t split = 0;
 		int w;
 		bool no_wrap = css_computed_white_space(
@@ -3292,10 +3420,33 @@ layout_line(struct box *first,
 				!left && !right && inline_count == 1) {
 			/* first word of box doesn't fit, but no floats and
 			 * first box on line so force in */
-			if (split == 0 || split == split_box->length) {
-				/* only one word in this box, or not text
-				 * or white-space:nowrap */
+			size_t word = (split == 0) ? 0 : split;
+			int avail = x1 - x0 - x - space_before;
+
+			if (word != 0 && w > avail && avail > 0 &&
+					layout_text_breaks_words(
+							split_box->style)) {
+				/* the word is too wide for the line, and may
+				 * be broken, so take as much as fits */
+				word = layout_text_fit_characters(font_func,
+						&fstyle, split_box->text, word,
+						avail, &w);
+			}
+
+			if (word != 0 && word < split) {
+				/* break within the first word */
+				if (!layout_text_box_split(content, &fstyle,
+						split_box, word, w))
+					return false;
 				b = split_box->next;
+			} else if (split == 0 || split == split_box->length) {
+				/* only one word in this box, or not text
+				 * or white-space:nowrap, with the ends of
+				 * inlines after it */
+				b = split_box->next;
+				while (b != line_end &&
+						layout_inline_end_is_empty(b))
+					b = b->next;
 			} else {
 				/* cut off first word for this line */
 				if (!layout_text_box_split(content, &fstyle,

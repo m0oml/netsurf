@@ -333,6 +333,34 @@ html_layout_style_value(const css_computed_style *style,
 				css_computed_overflow_y(style)));
 	}
 
+	if (strcmp(property, "overflow-wrap") == 0 ||
+	    strcmp(property, "word-wrap") == 0) {
+		switch (css_computed_overflow_wrap(style)) {
+		case CSS_OVERFLOW_WRAP_BREAK_WORD: return strdup("break-word");
+		case CSS_OVERFLOW_WRAP_ANYWHERE: return strdup("anywhere");
+		default: return strdup("normal");
+		}
+	}
+
+	if (strcmp(property, "word-break") == 0) {
+		switch (css_computed_word_break(style)) {
+		case CSS_WORD_BREAK_BREAK_ALL: return strdup("break-all");
+		case CSS_WORD_BREAK_KEEP_ALL: return strdup("keep-all");
+		case CSS_WORD_BREAK_BREAK_WORD: return strdup("break-word");
+		default: return strdup("normal");
+		}
+	}
+
+	if (strcmp(property, "white-space") == 0) {
+		switch (css_computed_white_space(style)) {
+		case CSS_WHITE_SPACE_PRE: return strdup("pre");
+		case CSS_WHITE_SPACE_NOWRAP: return strdup("nowrap");
+		case CSS_WHITE_SPACE_PRE_WRAP: return strdup("pre-wrap");
+		case CSS_WHITE_SPACE_PRE_LINE: return strdup("pre-line");
+		default: return strdup("normal");
+		}
+	}
+
 	if (strcmp(property, "color") == 0) {
 		css_computed_color(style, &colour);
 		return html_layout_colour(colour);

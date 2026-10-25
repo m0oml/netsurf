@@ -1083,14 +1083,16 @@
     "list-style-position list-style-type margin margin-bottom margin-left " +
     "margin-right margin-top max-height max-width min-height min-width " +
     "opacity order orphans outline outline-color outline-style " +
-    "outline-width overflow overflow-x overflow-y padding padding-bottom " +
+    "outline-width overflow overflow-wrap overflow-x overflow-y padding " +
+    "padding-bottom " +
     "padding-left padding-right padding-top page-break-after " +
     "page-break-before page-break-inside pause pause-after pause-before " +
     "pitch-range pitch play-during position quotes richness right " +
     "speak-header speak-numeral speak-punctuation speak speech-rate " +
     "stress stroke-opacity table-layout text-align text-decoration " +
     "text-indent text-transform top unicode-bidi vertical-align " +
-    "visibility voice-family volume white-space widows width word-spacing " +
+    "visibility voice-family volume white-space widows width word-break " +
+    "word-spacing word-wrap " +
     "writing-mode z-index"
   ).split(" "));
 
