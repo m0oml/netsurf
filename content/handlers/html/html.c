@@ -1337,13 +1337,15 @@ bool html_early_layout(html_content *htmlc)
 		return false;
 	}
 
-	err = html_retrieve_forms(htmlc);
-	if (err != NSERROR_OK) {
+	/* a script can have emptied the document */
+	exc = dom_document_get_document_element(htmlc->document, &html);
+	if ((exc != DOM_NO_ERR) || (html == NULL)) {
 		return false;
 	}
 
-	exc = dom_document_get_document_element(htmlc->document, &html);
-	if ((exc != DOM_NO_ERR) || (html == NULL)) {
+	err = html_retrieve_forms(htmlc);
+	if (err != NSERROR_OK) {
+		dom_node_unref(html);
 		return false;
 	}
 
