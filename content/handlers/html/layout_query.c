@@ -351,6 +351,20 @@ html_layout_style_value(const css_computed_style *style,
 		}
 	}
 
+	if (strcmp(property, "justify-content") == 0) {
+		switch (css_computed_justify_content(style)) {
+		case CSS_JUSTIFY_CONTENT_FLEX_END: return strdup("flex-end");
+		case CSS_JUSTIFY_CONTENT_CENTER: return strdup("center");
+		case CSS_JUSTIFY_CONTENT_SPACE_BETWEEN:
+			return strdup("space-between");
+		case CSS_JUSTIFY_CONTENT_SPACE_AROUND:
+			return strdup("space-around");
+		case CSS_JUSTIFY_CONTENT_SPACE_EVENLY:
+			return strdup("space-evenly");
+		default: return strdup("flex-start");
+		}
+	}
+
 	if (strcmp(property, "white-space") == 0) {
 		switch (css_computed_white_space(style)) {
 		case CSS_WHITE_SPACE_PRE: return strdup("pre");

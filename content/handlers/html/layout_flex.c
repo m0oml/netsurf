@@ -935,6 +935,61 @@ static bool layout_flex__resolve_line(
 }
 
 /**
+ * Share out the free space of a line as justify-content says.
+ *
+ * \param[in]     ctx        Flex layout context
+ * \param[in]     line       Line to share out space on
+ * \param[in]     free_main  The free space on the line, in pixels
+ * \param[in,out] main_pos   The position of the first item, updated to
+ *                           where it is after the leading space
+ * \param[out]    spacing    Updated to the space after each item
+ */
+static void layout_flex__justify(const struct flex_ctx *ctx,
+		const struct flex_line_data *line, int free_main,
+		int *main_pos, int *spacing)
+{
+	int offset = 0;
+	int count = 0;
+
+	for (size_t i = line->first; i < line->first + line->count; i++) {
+		if (!lh__box_is_absolute(ctx->item.data[i].box)) {
+			count++;
+		}
+	}
+
+	if (count == 0 || free_main <= 0) {
+		return;
+	}
+
+	switch (css_computed_justify_content(ctx->flex->style)) {
+	case CSS_JUSTIFY_CONTENT_FLEX_END:
+		offset = free_main;
+		break;
+	case CSS_JUSTIFY_CONTENT_CENTER:
+		offset = free_main / 2;
+		break;
+	case CSS_JUSTIFY_CONTENT_SPACE_BETWEEN:
+		if (count > 1) {
+			*spacing = free_main / (count - 1);
+		}
+		break;
+	case CSS_JUSTIFY_CONTENT_SPACE_AROUND:
+		*spacing = free_main / count;
+		offset = *spacing / 2;
+		break;
+	case CSS_JUSTIFY_CONTENT_SPACE_EVENLY:
+		*spacing = free_main / (count + 1);
+		offset = *spacing;
+		break;
+	default:
+		break;
+	}
+
+	/* the start of a reversed line is its far end */
+	*main_pos += ctx->main_reversed ? -offset : offset;
+}
+
+/**
  * Position items along a line
  *
  * \param[in] ctx   Flex layout context
@@ -952,6 +1007,7 @@ static bool layout_flex__place_line_items_main(
 	size_t item_count = line->first + line->count;
 	int extra_remainder = 0;
 	int extra = 0;
+	int spacing = 0;
 
 	if (ctx->main_reversed) {
 		int container_main = lh__box_size_main(ctx->horizontal,
@@ -982,6 +1038,13 @@ static bool layout_flex__place_line_items_main(
 
 			extra_remainder = extra % line->main_auto_margin_count;
 			extra /= line->main_auto_margin_count;
+		} else {
+			/* justify-content shares out what is left, if no
+			 * auto margins have taken it */
+			layout_flex__justify(ctx, line,
+					ctx->available_main -
+					line->used_main_size,
+					&main_pos, &spacing);
 		}
 	}
 
@@ -1048,7 +1111,8 @@ static bool layout_flex__place_line_items_main(
 					(extra_total + box_size_main +
 					 lh__delta_outer_main(ctx->flex, b));
 			main_pos += ctx->main_reversed ?
-					-ctx->main_gap : ctx->main_gap;
+					-(ctx->main_gap + spacing) :
+					ctx->main_gap + spacing;
 
 			cross_size = box_size_cross + lh__delta_outer_cross(
 					ctx->flex, b);
