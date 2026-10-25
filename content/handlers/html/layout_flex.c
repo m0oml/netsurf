@@ -839,6 +839,15 @@ static bool layout_flex__resolve_line(
 		 */
 		if (indefinite) {
 			item->target_main_size = item->main_size;
+
+			/* An item with a basis smaller than its content,
+			 * such as flex: 1, keeps its content's size */
+			if (item->target_main_size < item->auto_min_main) {
+				line->main_size += item->auto_min_main -
+						item->target_main_size;
+				item->target_main_size = item->auto_min_main;
+			}
+
 			layout_flex__item_freeze(line, item);
 			initial_free_main -= item->target_main_size;
 			continue;
