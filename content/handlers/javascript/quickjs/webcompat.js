@@ -5091,6 +5091,389 @@
     set domain(value) {}
   });
 
+  /* Location converts to its URL */
+  {
+    const locationProto = Object.getPrototypeOf(global.location);
+    defineMethods(locationProto, {
+      toString() { return this.href; }
+    });
+    Object.defineProperty(locationProto, Symbol.toPrimitive, {
+      value() { return this.href; }, configurable: true
+    });
+  }
+
+  /* Navigator, with what a browser which has no device access reports */
+  {
+    const nav = global.navigator;
+    const proto = Object.getPrototypeOf(nav);
+    const ua = String(nav.userAgent || "");
+    const replace = (name, get) => Object.defineProperty(proto, name, {
+      get, set(value) {}, enumerable: true, configurable: true
+    });
+    const platform = /RISC OS/i.test(ua) ? "RISC OS" : /Windows/i.test(ua) ? "Win32"
+      : /Mac/i.test(ua) ? "MacIntel" : "Linux";
+    replace("platform", () => platform);
+    replace("vendor", () => "");
+    replace("vendorSub", () => "");
+    replace("language", () => "en-GB");
+    replace("languages", () => Object.freeze(["en-GB", "en"]));
+    replace("onLine", () => true);
+    replace("hardwareConcurrency", () => 1);
+    replace("maxTouchPoints", () => 0);
+    replace("webdriver", () => false);
+    replace("pdfViewerEnabled", () => false);
+    replace("doNotTrack", () => null);
+    replace("cookieEnabled", () => typeof global.document.cookie === "string");
+    replace("plugins", () => nodeList([]));
+    replace("mimeTypes", () => nodeList([]));
+    defineMethods(proto, {
+      sendBeacon() { return false; },
+      vibrate() { return false; }
+    });
+    const denied = (message) => domError("NotAllowedError", message);
+    Object.defineProperty(proto, "clipboard", {
+      get() {
+        return {
+          writeText: () => Promise.reject(denied("Clipboard access is not allowed")),
+          readText: () => Promise.reject(denied("Clipboard access is not allowed")),
+          write: () => Promise.reject(denied("Clipboard access is not allowed")),
+          read: () => Promise.reject(denied("Clipboard access is not allowed"))
+        };
+      },
+      enumerable: true, configurable: true
+    });
+    Object.defineProperty(proto, "permissions", {
+      get() {
+        return { query: () => Promise.resolve({ state: "denied", onchange: null }) };
+      },
+      enumerable: true, configurable: true
+    });
+    Object.defineProperty(proto, "storage", {
+      get() {
+        return {
+          estimate: () => Promise.resolve({ quota: 0, usage: 0 }),
+          persisted: () => Promise.resolve(false),
+          persist: () => Promise.resolve(false)
+        };
+      },
+      enumerable: true, configurable: true
+    });
+    Object.defineProperty(proto, "geolocation", {
+      get() {
+        const refuse = (success, failure) => {
+          if (typeof failure === "function") {
+            setTimeout(() => failure({ code: 1, message: "User denied Geolocation", PERMISSION_DENIED: 1 }), 0);
+          }
+        };
+        return { getCurrentPosition: refuse, watchPosition: (s, f) => { refuse(s, f); return 0; }, clearWatch() {} };
+      },
+      enumerable: true, configurable: true
+    });
+  }
+
+  /* NodeFilter, TreeWalker and NodeIterator */
+  {
+    const NodeFilter = {};
+    for (const [name, value] of Object.entries({
+      FILTER_ACCEPT: 1, FILTER_REJECT: 2, FILTER_SKIP: 3, SHOW_ALL: 0xFFFFFFFF, SHOW_ELEMENT: 1,
+      SHOW_ATTRIBUTE: 2, SHOW_TEXT: 4, SHOW_CDATA_SECTION: 8, SHOW_ENTITY_REFERENCE: 16,
+      SHOW_ENTITY: 32, SHOW_PROCESSING_INSTRUCTION: 64, SHOW_COMMENT: 128, SHOW_DOCUMENT: 256,
+      SHOW_DOCUMENT_TYPE: 512, SHOW_DOCUMENT_FRAGMENT: 1024, SHOW_NOTATION: 2048
+    })) {
+      Object.defineProperty(NodeFilter, name, { value, enumerable: true });
+    }
+    Object.defineProperty(NodeFilter, Symbol.toStringTag, { value: "NodeFilter" });
+    defineGlobal("NodeFilter", NodeFilter);
+
+    const ACCEPT = 1, REJECT = 2, SKIP = 3;
+    const accept = (traversal, node) => {
+      if (!(traversal.whatToShow & (1 << (node.nodeType - 1)))) {
+        return SKIP;
+      }
+      const filter = traversal.filter;
+      if (filter === null || filter === undefined) {
+        return ACCEPT;
+      }
+      return typeof filter === "function" ? filter(node) : filter.acceptNode(node);
+    };
+
+    const setup = (kind, self, root, whatToShow, filter) => {
+      if (!root) {
+        throw new TypeError(`Failed to execute '${kind}': 1 argument required`);
+      }
+      self.root = root;
+      self.whatToShow = whatToShow === undefined ? 0xFFFFFFFF : whatToShow >>> 0;
+      self.filter = filter === undefined ? null : filter;
+    };
+
+    class TreeWalker {
+      constructor(root, whatToShow, filter) {
+        setup("createTreeWalker", this, root, whatToShow, filter);
+        this.currentNode = root;
+      }
+
+      #children(first) {
+        let node = first ? this.currentNode.firstChild : this.currentNode.lastChild;
+        while (node) {
+          const result = accept(this, node);
+          if (result === ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+          if (result === SKIP) {
+            const child = first ? node.firstChild : node.lastChild;
+            if (child) {
+              node = child;
+              continue;
+            }
+          }
+          while (node) {
+            const sibling = first ? node.nextSibling : node.previousSibling;
+            if (sibling) {
+              node = sibling;
+              break;
+            }
+            const parent = node.parentNode;
+            if (!parent || parent === this.root || parent === this.currentNode) {
+              return null;
+            }
+            node = parent;
+          }
+        }
+        return null;
+      }
+
+      #siblings(next) {
+        let node = this.currentNode;
+        if (node === this.root) {
+          return null;
+        }
+        for (;;) {
+          let sibling = next ? node.nextSibling : node.previousSibling;
+          while (sibling) {
+            node = sibling;
+            const result = accept(this, node);
+            if (result === ACCEPT) {
+              this.currentNode = node;
+              return node;
+            }
+            sibling = next ? node.firstChild : node.lastChild;
+            if (result === REJECT || !sibling) {
+              sibling = next ? node.nextSibling : node.previousSibling;
+            }
+          }
+          node = node.parentNode;
+          if (!node || node === this.root || accept(this, node) === ACCEPT) {
+            return null;
+          }
+        }
+      }
+
+      parentNode() {
+        let node = this.currentNode;
+        while (node && node !== this.root) {
+          node = node.parentNode;
+          if (node && accept(this, node) === ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+        }
+        return null;
+      }
+      firstChild() { return this.#children(true); }
+      lastChild() { return this.#children(false); }
+      nextSibling() { return this.#siblings(true); }
+      previousSibling() { return this.#siblings(false); }
+
+      nextNode() {
+        let node = this.currentNode;
+        let result = ACCEPT;
+        for (;;) {
+          while (result !== REJECT && node.firstChild) {
+            node = node.firstChild;
+            result = accept(this, node);
+            if (result === ACCEPT) {
+              this.currentNode = node;
+              return node;
+            }
+          }
+          let sibling = null;
+          let temp = node;
+          while (temp) {
+            if (temp === this.root) {
+              return null;
+            }
+            sibling = temp.nextSibling;
+            if (sibling) {
+              node = sibling;
+              break;
+            }
+            temp = temp.parentNode;
+          }
+          if (!sibling) {
+            return null;
+          }
+          result = accept(this, node);
+          if (result === ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+        }
+      }
+
+      previousNode() {
+        let node = this.currentNode;
+        while (node !== this.root) {
+          let sibling = node.previousSibling;
+          while (sibling) {
+            node = sibling;
+            let result = accept(this, node);
+            while (result !== REJECT && node.lastChild) {
+              node = node.lastChild;
+              result = accept(this, node);
+            }
+            if (result === ACCEPT) {
+              this.currentNode = node;
+              return node;
+            }
+            sibling = node.previousSibling;
+          }
+          if (node === this.root || !node.parentNode) {
+            return null;
+          }
+          node = node.parentNode;
+          if (accept(this, node) === ACCEPT) {
+            this.currentNode = node;
+            return node;
+          }
+        }
+        return null;
+      }
+
+      get [Symbol.toStringTag]() { return "TreeWalker"; }
+    }
+
+    const following = (node, root) => {
+      if (node.firstChild) {
+        return node.firstChild;
+      }
+      for (; node && node !== root; node = node.parentNode) {
+        if (node.nextSibling) {
+          return node.nextSibling;
+        }
+      }
+      return null;
+    };
+    const preceding = (node, root) => {
+      if (node === root) {
+        return null;
+      }
+      let sibling = node.previousSibling;
+      if (sibling) {
+        while (sibling.lastChild) {
+          sibling = sibling.lastChild;
+        }
+        return sibling;
+      }
+      return node.parentNode;
+    };
+
+    class NodeIterator {
+      constructor(root, whatToShow, filter) {
+        setup("createNodeIterator", this, root, whatToShow, filter);
+        this.referenceNode = root;
+        this.pointerBeforeReferenceNode = true;
+      }
+
+      #step(next) {
+        let node = this.referenceNode;
+        let before = this.pointerBeforeReferenceNode;
+        for (;;) {
+          if (next) {
+            if (!before) {
+              node = following(node, this.root);
+              if (!node) {
+                return null;
+              }
+            } else {
+              before = false;
+            }
+          } else if (before) {
+            node = preceding(node, this.root);
+            if (!node) {
+              return null;
+            }
+          } else {
+            before = true;
+          }
+          if (accept(this, node) === ACCEPT) {
+            break;
+          }
+        }
+        this.referenceNode = node;
+        this.pointerBeforeReferenceNode = before;
+        return node;
+      }
+      nextNode() { return this.#step(true); }
+      previousNode() { return this.#step(false); }
+      detach() {}
+
+      get [Symbol.toStringTag]() { return "NodeIterator"; }
+    }
+
+    defineGlobal("TreeWalker", TreeWalker);
+    defineGlobal("NodeIterator", NodeIterator);
+    defineMethods(Document.prototype, {
+      createTreeWalker(root, whatToShow, filter) { return new TreeWalker(root, whatToShow, filter); },
+      createNodeIterator(root, whatToShow, filter) { return new NodeIterator(root, whatToShow, filter); }
+    });
+  }
+
+  /* XPath, which finds nothing
+   *
+   * \todo evaluate expressions
+   */
+  {
+    class XPathResult {
+      constructor(type) {
+        this.resultType = type || 0;
+        this.snapshotLength = 0;
+        this.booleanValue = false;
+        this.numberValue = NaN;
+        this.stringValue = "";
+        this.singleNodeValue = null;
+        this.invalidIteratorState = false;
+      }
+      iterateNext() { return null; }
+      snapshotItem() { return null; }
+    }
+    for (const [name, value] of Object.entries({
+      ANY_TYPE: 0, NUMBER_TYPE: 1, STRING_TYPE: 2, BOOLEAN_TYPE: 3, UNORDERED_NODE_ITERATOR_TYPE: 4,
+      ORDERED_NODE_ITERATOR_TYPE: 5, UNORDERED_NODE_SNAPSHOT_TYPE: 6, ORDERED_NODE_SNAPSHOT_TYPE: 7,
+      ANY_UNORDERED_NODE_TYPE: 8, FIRST_ORDERED_NODE_TYPE: 9
+    })) {
+      Object.defineProperty(XPathResult, name, { value, enumerable: true });
+      Object.defineProperty(XPathResult.prototype, name, { value, enumerable: true });
+    }
+    class XPathExpression {
+      evaluate(context, type) { return new XPathResult(type); }
+    }
+    class XPathEvaluator {
+      createExpression() { return new XPathExpression(); }
+      createNSResolver(node) { return node; }
+      evaluate(expression, context, resolver, type) { return new XPathResult(type); }
+    }
+    defineGlobal("XPathResult", XPathResult);
+    defineGlobal("XPathExpression", XPathExpression);
+    defineGlobal("XPathEvaluator", XPathEvaluator);
+    const evaluator = new XPathEvaluator();
+    defineMethods(Document.prototype, {
+      createExpression: (...a) => evaluator.createExpression(...a),
+      createNSResolver: (...a) => evaluator.createNSResolver(...a),
+      evaluate: (...a) => evaluator.evaluate(...a)
+    });
+  }
+
   /* Tree queries which the bindings leave without a result */
   defineMethods(Node.prototype, {
     contains(other) {
