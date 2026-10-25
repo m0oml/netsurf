@@ -5512,6 +5512,86 @@
     }
   }
 
+  /* Events made by createEvent and set up by init methods */
+  {
+    const classes = {
+      event: "Event", events: "Event", htmlevents: "Event", customevent: "CustomEvent",
+      uievent: "UIEvent", uievents: "UIEvent", mouseevent: "MouseEvent", mouseevents: "MouseEvent",
+      keyboardevent: "KeyboardEvent", focusevent: "FocusEvent", messageevent: "MessageEvent"
+    };
+    const fields = (event, values) => {
+      for (const [name, value] of Object.entries(values)) {
+        Object.defineProperty(event, name, { value, configurable: true, enumerable: true });
+      }
+    };
+    const inits = {
+      CustomEvent: ["initCustomEvent", ["detail"], (d) => ({ detail: d.detail === undefined ? null : d.detail })],
+      UIEvent: ["initUIEvent", ["view", "detail"], (d) => ({ view: d.view === undefined ? null : d.view, detail: d.detail | 0 })],
+      MouseEvent: ["initMouseEvent", ["view", "detail", "screenX", "screenY", "clientX", "clientY",
+        "ctrlKey", "altKey", "shiftKey", "metaKey", "button", "relatedTarget"], (d) => ({
+        view: d.view === undefined ? null : d.view, detail: d.detail | 0, screenX: d.screenX | 0,
+        screenY: d.screenY | 0, clientX: d.clientX | 0, clientY: d.clientY | 0, ctrlKey: !!d.ctrlKey,
+        altKey: !!d.altKey, shiftKey: !!d.shiftKey, metaKey: !!d.metaKey, button: d.button | 0,
+        relatedTarget: d.relatedTarget === undefined ? null : d.relatedTarget })],
+      KeyboardEvent: ["initKeyboardEvent", ["view", "key", "location", "ctrlKey", "altKey", "shiftKey", "metaKey"],
+        (d) => ({ view: d.view === undefined ? null : d.view, key: d.key === undefined ? "" : String(d.key),
+        location: d.location | 0, ctrlKey: !!d.ctrlKey, altKey: !!d.altKey, shiftKey: !!d.shiftKey, metaKey: !!d.metaKey })]
+    };
+    for (const [iface, [method, keys, clean]] of Object.entries(inits)) {
+      const ctor = global[iface];
+      if (typeof ctor === "function" && ctor.prototype) {
+        defineMethods(ctor.prototype, {
+          [method]: function (type, bubbles, cancelable, ...rest) {
+            this.initEvent(type, !!bubbles, !!cancelable);
+            const given = {};
+            keys.forEach((key, i) => { given[key] = rest[i]; });
+            fields(this, clean(given));
+          }
+        });
+      }
+    }
+    const nativeCreateEvent = Document.prototype.createEvent;
+    defineMethods(Document.prototype, {
+      createEvent(iface) {
+        const name = classes[String(iface).toLowerCase()];
+        if (!name || typeof global[name] !== "function") {
+          throw domError("NotSupportedError", `The event interface '${iface}' is not supported`);
+        }
+        const event = nativeCreateEvent.call(this, "Event");
+        if (name !== "Event") {
+          Object.setPrototypeOf(event, global[name].prototype);
+        }
+        return event;
+      }
+    });
+  }
+
+  /* Slots, which hold nothing since shadow trees are flattened */
+  {
+    class HTMLSlotElement extends global.HTMLElement {
+      static [Symbol.hasInstance](value) {
+        return !!value && value.nodeType === 1 && value.tagName === "SLOT";
+      }
+    }
+    defineGlobal("HTMLSlotElement", HTMLSlotElement);
+    const slotMethod = (name, fn) => Object.defineProperty(global.HTMLElement.prototype, name, {
+      value(...args) {
+        if (this.tagName !== "SLOT") {
+          throw new TypeError(`${name} is not a function`);
+        }
+        return fn.apply(this, args);
+      },
+      writable: true, configurable: true, enumerable: true
+    });
+    slotMethod("assignedNodes", function (options) {
+      return options && options.flatten ? Array.from(this.childNodes) : [];
+    });
+    slotMethod("assignedElements", function (options) {
+      return options && options.flatten ? Array.from(this.children) : [];
+    });
+    slotMethod("assign", () => {});
+  }
+
   /* Tree queries which the bindings leave without a result */
   defineMethods(Node.prototype, {
     contains(other) {
