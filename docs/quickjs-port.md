@@ -1,6 +1,13 @@
 QuickJS port and CSS work
 =========================
 
+**LLM-assisted.**  This work was written with the help of an AI coding
+assistant (Claude, from Anthropic), directed, reviewed and tested by the
+author.  Each commit carries a `Co-Authored-By` trailer naming the model, so
+`git log` shows which changes were assisted.  Please review it as you would
+any contribution, and say if the project's policy on assisted code means any
+of it should not be used.
+
 This branch (`quickjs-engine`) replaces NetSurf's Duktape JavaScript engine
 with QuickJS-ng as an option, and adds a number of CSS features, mainly to
 make modern sites usable on RISC OS on a Raspberry Pi.  It is offered to the
