@@ -5474,6 +5474,44 @@
     });
   }
 
+  /* Nodes from other documents, of which there is only the one */
+  defineMethods(Document.prototype, {
+    importNode(node, deep = false) {
+      if (!node || node.nodeType === 9) {
+        throw domError("NotSupportedError", "The node cannot be imported");
+      }
+      return node.cloneNode(!!deep);
+    },
+    adoptNode(node) {
+      if (!node || node.nodeType === 9) {
+        throw domError("NotSupportedError", "The node cannot be adopted");
+      }
+      if (node.parentNode) {
+        node.parentNode.removeChild(node);
+      }
+      return node;
+    }
+  });
+
+  if (typeof global.CDATASection !== "function") {
+    class CDATASection extends global.Text {
+      constructor() {
+        throw new TypeError("Illegal constructor");
+      }
+    }
+    defineGlobal("CDATASection", CDATASection);
+  }
+
+  /* The document reports its changes of state, which the engine only
+   * makes visible in readyState */
+  {
+    const report = () => global.document.dispatchEvent(new global.Event("readystatechange"));
+    if (global.document.readyState === "loading") {
+      global.document.addEventListener("DOMContentLoaded", report);
+      global.addEventListener("load", report);
+    }
+  }
+
   /* Tree queries which the bindings leave without a result */
   defineMethods(Node.prototype, {
     contains(other) {
