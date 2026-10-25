@@ -5294,7 +5294,66 @@ static void layout_compute_relative_offset(
 
 
 /**
- * Adjust positions of relatively positioned boxes.
+ * Compute the translation a box's transform makes.
+ *
+ * Only the translation of a transform is supported.  Percentages are of
+ * the box's border box.  Inline boxes are not transformed.
+ *
+ * \param  unit_len_ctx  Length conversion context
+ * \param  box  Box to compute the translation of
+ * \param  x    Receives the translation in x
+ * \param  y    Receives the translation in y
+ * \return true if the box is translated
+ */
+static bool layout_compute_translation(
+		const css_unit_ctx *unit_len_ctx,
+		const struct box *box,
+		int *x,
+		int *y)
+{
+	css_fixed tx = 0, ty = 0;
+	css_unit tx_unit = CSS_UNIT_PX, ty_unit = CSS_UNIT_PX;
+
+	*x = *y = 0;
+
+	if (box->style == NULL ||
+			box->type == BOX_INLINE ||
+			box->type == BOX_INLINE_END ||
+			box->type == BOX_TEXT ||
+			css_computed_transform(box->style, &tx, &tx_unit,
+					&ty, &ty_unit) != CSS_TRANSFORM_TRANSLATE) {
+		return false;
+	}
+
+	if (tx_unit == CSS_UNIT_PCT) {
+		/* the macro does not bracket its arguments */
+		int width = box->border[LEFT].width + box->padding[LEFT] +
+				box->width + box->padding[RIGHT] +
+				box->border[RIGHT].width;
+
+		*x = FPCT_OF_INT_TOINT(tx, width);
+	} else {
+		*x = FIXTOINT(css_unit_len2device_px(box->style,
+				unit_len_ctx, tx, tx_unit));
+	}
+
+	if (ty_unit == CSS_UNIT_PCT) {
+		int height = box->border[TOP].width + box->padding[TOP] +
+				box->height + box->padding[BOTTOM] +
+				box->border[BOTTOM].width;
+
+		*y = FPCT_OF_INT_TOINT(ty, height);
+	} else {
+		*y = FIXTOINT(css_unit_len2device_px(box->style,
+				unit_len_ctx, ty, ty_unit));
+	}
+
+	return *x != 0 || *y != 0;
+}
+
+
+/**
+ * Adjust positions of relatively positioned and translated boxes.
  *
  * \param  unit_len_ctx  Length conversion context
  * \param  root  box to adjust the position of
@@ -5323,6 +5382,7 @@ layout_position_relative(
 	int x, y;	 /* for the offsets resulting from any relative
 			  * positioning on the current block */
 	int fnx, fny;    /* for affsets which apply to flat children of "box" */
+	int tx, ty;	 /* for the translation of the current block */
 
 	/**\todo ensure containing box is large enough after moving boxes */
 
@@ -5341,6 +5401,12 @@ layout_position_relative(
 					unit_len_ctx, box, &x, &y);
 		else
 			x = y = 0;
+
+		/* A transform's translation moves the box in the same way */
+		if (layout_compute_translation(unit_len_ctx, box, &tx, &ty)) {
+			x += tx;
+			y += ty;
+		}
 
 		/* Adjust float coordinates.
 		 * (note float x and y are relative to their block formatting
@@ -5376,10 +5442,8 @@ layout_position_relative(
 		/* recurse first */
 		layout_position_relative(unit_len_ctx, box, fn, fnx, fny);
 
-		/* Ignore things we're not interested in. */
-		if (!box->style || (box->style &&
-				css_computed_position(box->style) !=
-				CSS_POSITION_RELATIVE))
+		/* Ignore boxes which are not moved. */
+		if (x == 0 && y == 0)
 			continue;
 
 		box->x += x;

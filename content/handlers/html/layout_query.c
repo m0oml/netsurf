@@ -497,6 +497,58 @@ html_layout_radius_value(const css_computed_style *style,
 
 
 /**
+ * Get the computed transform of a box, as a matrix of its translation.
+ *
+ * \return the value, or NULL if the property is not transform
+ */
+static char *
+html_layout_transform_value(struct box *box,
+			    const css_unit_ctx *unit_len_ctx,
+			    const char *property)
+{
+	css_fixed tx = 0, ty = 0;
+	css_unit tx_unit = CSS_UNIT_PX, ty_unit = CSS_UNIT_PX;
+	char buf[64];
+	int x, y;
+
+	if (strcmp(property, "transform") != 0) {
+		return NULL;
+	}
+
+	if (css_computed_transform(box->style, &tx, &tx_unit,
+			&ty, &ty_unit) != CSS_TRANSFORM_TRANSLATE) {
+		return strdup("none");
+	}
+
+	if (tx_unit == CSS_UNIT_PCT) {
+		/* the macro does not bracket its arguments */
+		int width = box->border[LEFT].width + box->padding[LEFT] +
+				box->width + box->padding[RIGHT] +
+				box->border[RIGHT].width;
+
+		x = FPCT_OF_INT_TOINT(tx, width);
+	} else {
+		x = FIXTOINT(css_unit_len2device_px(box->style,
+				unit_len_ctx, tx, tx_unit));
+	}
+
+	if (ty_unit == CSS_UNIT_PCT) {
+		int height = box->border[TOP].width + box->padding[TOP] +
+				box->height + box->padding[BOTTOM] +
+				box->border[BOTTOM].width;
+
+		y = FPCT_OF_INT_TOINT(ty, height);
+	} else {
+		y = FIXTOINT(css_unit_len2device_px(box->style,
+				unit_len_ctx, ty, ty_unit));
+	}
+
+	snprintf(buf, sizeof buf, "matrix(1, 0, 0, 1, %d, %d)", x, y);
+	return strdup(buf);
+}
+
+
+/**
  * Get a used value from a box, such as a margin or size.
  *
  * \return the value, or NULL if the property is not one of these
@@ -564,6 +616,12 @@ html_layout_computed_style(html_content *htmlc,
 
 	value = html_layout_radius_value(box->style, &htmlc->unit_len_ctx,
 					 property);
+	if (value != NULL) {
+		return value;
+	}
+
+	value = html_layout_transform_value(box, &htmlc->unit_len_ctx,
+					    property);
 	if (value != NULL) {
 		return value;
 	}

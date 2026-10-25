@@ -1090,7 +1090,7 @@
     "pitch-range pitch play-during position quotes richness right " +
     "speak-header speak-numeral speak-punctuation speak speech-rate " +
     "stress stroke-opacity table-layout text-align text-decoration " +
-    "text-indent text-transform top unicode-bidi vertical-align " +
+    "text-indent text-transform top transform unicode-bidi vertical-align " +
     "visibility voice-family volume white-space widows width word-break " +
     "word-spacing word-wrap " +
     "writing-mode z-index"
