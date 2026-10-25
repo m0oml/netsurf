@@ -68,6 +68,46 @@ bool layout_flex(
 		int available_width,
 		html_content *content);
 
+/**
+ * Layout a grid container.
+ *
+ * \param[in] grid             grid container to layout
+ * \param[in] available_width  width of containing block
+ * \param[in] content          memory pool for any new boxes
+ * \return  true on success, false on memory exhaustion
+ */
+bool layout_grid(
+		struct box *grid,
+		int available_width,
+		html_content *content);
+
+/**
+ * Find the minimum and maximum content widths of a grid container.
+ *
+ * The widths of the grid's children must be known.
+ *
+ * \param[in]  grid       grid container
+ * \param[in]  content    the HTML content
+ * \param[out] min_width  updated to the minimum width of the content box
+ * \param[out] max_width  updated to the maximum width of the content box
+ * \return  true on success, false on memory exhaustion
+ */
+bool layout_minmax_grid(
+		struct box *grid,
+		const html_content *content,
+		int *min_width,
+		int *max_width);
+
+/**
+ * Check whether a box is a grid container.
+ *
+ * Grid containers have the flex container box types.
+ *
+ * \param[in] b  box to check
+ * \return true if the box is laid out as a grid
+ */
+bool layout_grid_is_grid(const struct box *b);
+
 typedef uint8_t (*css_len_func)(
 		const css_computed_style *style,
 		css_fixed *length, css_unit *unit);

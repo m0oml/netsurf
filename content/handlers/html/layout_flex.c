@@ -63,6 +63,7 @@ struct flex_item_data {
 	int base_size;
 	int main_size;
 	int auto_min_main; /**< automatic minimum main size, with margins */
+	int32_t order; /**< the order property */
 	size_t line;
 
 	bool freeze;
@@ -338,9 +339,29 @@ static inline bool layout_flex__base_and_main_sizes(
 
 	if (ctx->horizontal == false) {
 		if (b->width == AUTO) {
-			b->width = min(max(content_min_width, available_width),
-					content_max_width);
+			if (ctx->wrap == CSS_FLEX_WRAP_NOWRAP &&
+			    lh__box_align_self(ctx->flex, b) ==
+					CSS_ALIGN_SELF_STRETCH &&
+			    b->margin[LEFT] != AUTO &&
+			    b->margin[RIGHT] != AUTO) {
+				/* a stretched item fills the line before its
+				 * height is found */
+				b->width = available_width;
+			} else {
+				b->width = min(max(content_min_width,
+						available_width),
+						content_max_width);
+			}
 			b->width -= lh__delta_outer_width(b);
+
+			if (item->max_cross >= 0 &&
+			    b->width > item->max_cross) {
+				b->width = item->max_cross;
+			}
+			if (b->width < item->min_cross) {
+				b->width = item->min_cross;
+			}
+			b->width = max(b->width, 0);
 		}
 
 		if (!layout_flex_item(ctx, item, b->width)) {
@@ -425,8 +446,22 @@ static void layout_flex_ctx__populate_item_data(
 
 		css_computed_flex_shrink(b->style, &item->shrink);
 		css_computed_flex_grow(b->style, &item->grow);
+		css_computed_order(b->style, &item->order);
 
 		layout_flex__base_and_main_sizes(ctx, item, available_width);
+	}
+
+	/* Items are placed in order of their order property, and then in
+	 * document order */
+	for (i = 1; i < ctx->item.count; i++) {
+		struct flex_item_data item = ctx->item.data[i];
+		size_t j = i;
+
+		while (j > 0 && ctx->item.data[j - 1].order > item.order) {
+			ctx->item.data[j] = ctx->item.data[j - 1];
+			j--;
+		}
+		ctx->item.data[j] = item;
 	}
 }
 
@@ -1161,6 +1196,10 @@ bool layout_flex(struct box *flex, int available_width,
 	int max_height, min_height;
 	struct flex_ctx *ctx;
 	bool success = false;
+
+	if (layout_grid_is_grid(flex)) {
+		return layout_grid(flex, available_width, content);
+	}
 
 	ctx = layout_flex_ctx__create(content, flex);
 	if (ctx == NULL) {

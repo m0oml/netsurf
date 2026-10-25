@@ -1149,6 +1149,11 @@ static void layout_minmax_block(
 		}
 	}
 
+	if (layout_grid_is_grid(block) && block->object == NULL &&
+			!layout_minmax_grid(block, content, &min, &max)) {
+		min = max = 0;
+	}
+
 	if (max < min) {
 		box_dump(stderr, block, 0, true);
 		assert(0);
@@ -1159,6 +1164,7 @@ static void layout_minmax_block(
 	 * its width is the one given. */
 	if (block->type != BOX_TABLE_CELL &&
 	    (!lh__box_is_flex_item(block) ||
+	     layout_grid_is_grid(block->parent) ||
 	     block->object != NULL || (block->flags & IS_REPLACED))) {
 		bool border_box = bs == CSS_BOX_SIZING_BORDER_BOX;
 		enum css_max_width_e max_type;

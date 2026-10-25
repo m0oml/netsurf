@@ -17,6 +17,7 @@ S_HTML := box_construct.c	\
 	interaction.c		\
 	layout.c		\
 	layout_flex.c		\
+	layout_grid.c		\
 	layout_query.c		\
 	object.c		\
 	rebuild.c		\
