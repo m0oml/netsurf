@@ -567,6 +567,30 @@ setter Element::innerHTML()
 	exc = dom_node_get_first_child(fragment, &html);
 	if (exc != DOM_NO_ERR) goto out;
 
+	/* Comments at the start of the markup come before the HTML element
+	 * and belong at the start of our content
+	 */
+	while (html != NULL) {
+		struct dom_node *cref;
+		dom_node_type type;
+
+		exc = dom_node_get_node_type(html, &type);
+		if (exc != DOM_NO_ERR) goto out;
+		if (type == DOM_ELEMENT_NODE) break;
+
+		exc = dom_node_remove_child(fragment, html, &cref);
+		if (exc != DOM_NO_ERR) goto out;
+		dom_node_unref(cref);
+		exc = dom_node_append_child(priv->parent.node, html, &cref);
+		if (exc != DOM_NO_ERR) goto out;
+		dom_node_unref(cref);
+		dom_node_unref(html);
+		html = NULL;
+		exc = dom_node_get_first_child(fragment, &html);
+		if (exc != DOM_NO_ERR) goto out;
+	}
+	if (html == NULL) goto out;
+
 	/* We can then ask that HTML element to give us its body */
 	exc = dom_element_get_elements_by_tag_name(html, corestring_dom_BODY, &bodies);
 	if (exc != DOM_NO_ERR) goto out;

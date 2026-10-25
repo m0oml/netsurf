@@ -4879,16 +4879,27 @@
     /* the prototype of templates, which is not always the interface's */
     const templateProto = Object.getPrototypeOf(global.document.createElement("template"));
     const own = Object.getOwnPropertyDescriptor(templateProto, "content");
+    /* The same fragment is the content each time it is asked for, as
+     * frameworks change it, until the template is given new nodes
+     */
+    const contents = new WeakMap();
     Object.defineProperty(templateProto, "content", {
       get() {
         if (this.tagName.toLowerCase() !== "template") {
           return own && own.get ? own.get.call(this) : this.getAttribute("content") ?? undefined;
         }
-        const fragment = global.document.createDocumentFragment();
-        for (const child of this.childNodes) {
-          fragment.appendChild(child.cloneNode(true));
+        let entry = contents.get(this);
+        if (entry === undefined || entry.first !== this.firstChild ||
+            entry.last !== this.lastChild || entry.count !== this.childNodes.length) {
+          const fragment = global.document.createDocumentFragment();
+          for (const child of this.childNodes) {
+            fragment.appendChild(child.cloneNode(true));
+          }
+          entry = { fragment, first: this.firstChild, last: this.lastChild,
+                    count: this.childNodes.length };
+          contents.set(this, entry);
         }
-        return fragment;
+        return entry.fragment;
       },
       set(value) { this.setAttribute("content", String(value)); },
       enumerable: true,
