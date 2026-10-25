@@ -4482,6 +4482,92 @@
     }
   }
 
+  /* Performance timeline, of the marks and measures which script makes */
+  {
+    const perf = global.performance;
+    const entries = [];
+    class PerformanceEntry {
+      constructor(name, entryType, startTime, duration, detail) {
+        this.name = name;
+        this.entryType = entryType;
+        this.startTime = startTime;
+        this.duration = duration;
+        this.detail = detail === undefined ? null : detail;
+      }
+      toJSON() { return { ...this }; }
+    }
+    class PerformanceMark extends PerformanceEntry {}
+    class PerformanceMeasure extends PerformanceEntry {}
+    defineGlobal("PerformanceEntry", PerformanceEntry);
+    defineGlobal("PerformanceMark", PerformanceMark);
+    defineGlobal("PerformanceMeasure", PerformanceMeasure);
+
+    const time = (point, fallback) => {
+      if (point === undefined) {
+        return fallback;
+      }
+      if (typeof point === "number") {
+        return point;
+      }
+      const mark = entries.findLast((e) => e.entryType === "mark" && e.name === String(point));
+      if (!mark) {
+        throw domError("SyntaxError", `The mark '${point}' does not exist`);
+      }
+      return mark.startTime;
+    };
+    const remove = (type, name) => {
+      for (let i = entries.length - 1; i >= 0; i--) {
+        if (entries[i].entryType === type && (name === undefined || entries[i].name === String(name))) {
+          entries.splice(i, 1);
+        }
+      }
+    };
+    const origin = Date.now() - perf.now();
+    defineMethods(perf, {
+      mark(name, options = {}) {
+        const entry = new PerformanceMark(String(name), "mark",
+          options.startTime !== undefined ? options.startTime : perf.now(), 0, options.detail);
+        entries.push(entry);
+        return entry;
+      },
+      measure(name, start, end) {
+        let options = {};
+        if (start !== null && typeof start === "object") {
+          options = start;
+        } else {
+          options = { start, end };
+        }
+        const now = perf.now();
+        const from = time(options.start, 0);
+        const to = options.end !== undefined ? time(options.end, now)
+          : options.duration !== undefined ? from + options.duration : now;
+        const entry = new PerformanceMeasure(String(name), "measure", from, to - from, options.detail);
+        entries.push(entry);
+        return entry;
+      },
+      clearMarks(name) { remove("mark", name); },
+      clearMeasures(name) { remove("measure", name); },
+      clearResourceTimings() {},
+      setResourceTimingBufferSize() {},
+      getEntries() { return entries.slice(); },
+      getEntriesByType(type) { return entries.filter((e) => e.entryType === String(type)); },
+      getEntriesByName(name, type) {
+        return entries.filter((e) => e.name === String(name) && (type === undefined || e.entryType === type));
+      },
+      toJSON() { return { timeOrigin: origin }; }
+    });
+    for (const [name, value] of Object.entries({ timeOrigin: origin, timing: {}, navigation: { type: 0, redirectCount: 0 } })) {
+      if (!(name in perf)) {
+        Object.defineProperty(perf, name, { value, enumerable: true, configurable: true });
+      }
+    }
+    if (!("memory" in perf)) {
+      Object.defineProperty(perf, "memory", {
+        value: { usedJSHeapSize: 0, totalJSHeapSize: 0, jsHeapSizeLimit: 0 }, enumerable: true, configurable: true
+      });
+    }
+  }
+
   /* PerformanceObserver */
 
   /** \todo report performance entries */
@@ -4683,6 +4769,27 @@
   });
   defineMember(global.HTMLFormElement && global.HTMLFormElement.prototype, "length", {
     get() { return formElements(this).length; }
+  });
+
+  defineMethods(global.HTMLFormElement.prototype, {
+    requestSubmit(submitter) {
+      if (submitter !== undefined && submitter !== null) {
+        const type = (submitter.getAttribute("type") || (submitter.tagName === "BUTTON" ? "submit" : "")).toLowerCase();
+        if (!/^(submit|image)$/.test(type) || !/^(BUTTON|INPUT)$/.test(submitter.tagName)) {
+          throw new TypeError("The submitter is not a submit button");
+        }
+        if (submitter.form !== this) {
+          throw domError("NotFoundError", "The submitter is not in this form");
+        }
+      }
+      const event = new global.Event("submit", { bubbles: true, cancelable: true });
+      if (submitter) {
+        Object.defineProperty(event, "submitter", { value: submitter });
+      }
+      if (this.dispatchEvent(event)) {
+        this.submit();
+      }
+    }
   });
 
   const selectOptions = (select) => withNamedItem(
@@ -4964,6 +5071,26 @@
     Object.defineProperty(Intl, Symbol.toStringTag, { value: "Intl" });
     defineGlobal("Intl", Intl);
   }
+  /* Timer handles which are not numbers are not timers, and clearing them
+   * does nothing */
+  for (const name of ["clearTimeout", "clearInterval"]) {
+    const original = global[name];
+    if (typeof original === "function") {
+      defineGlobal(name, function (handle) {
+        const id = Number(handle);
+        if (handle === undefined || handle === null || !(id >= 0)) {
+          return;
+        }
+        original(id);
+      });
+    }
+  }
+
+  defineAccessors(Document.prototype, {
+    get domain() { return location.hostname; },
+    set domain(value) {}
+  });
+
   /* Tree queries which the bindings leave without a result */
   defineMethods(Node.prototype, {
     contains(other) {
