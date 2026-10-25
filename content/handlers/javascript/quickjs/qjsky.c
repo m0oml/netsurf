@@ -37,6 +37,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <nsutils/time.h>
@@ -1371,6 +1372,48 @@ qjsky_native_css_supports(JSContext *jctx,
 
 
 /**
+ * Native: __netsurf_random(length), an ArrayBuffer of random bytes.
+ *
+ * The bytes come from the operating system's random device where there is
+ * one, otherwise from a mix of the clock and the C library's generator,
+ * which is not suitable for keys.
+ */
+static JSValue
+qjsky_native_random(JSContext *jctx,
+		    JSValueConst this_val,
+		    int argc,
+		    JSValueConst *argv)
+{
+	uint8_t buf[256];
+	uint32_t length;
+	size_t got = 0;
+	FILE *f;
+
+	if (argc < 1 || JS_ToUint32(jctx, &length, argv[0]) < 0) {
+		return JS_EXCEPTION;
+	}
+	if (length > sizeof(buf)) {
+		return JS_ThrowRangeError(jctx, "too many random bytes");
+	}
+
+	f = fopen("/dev/urandom", "rb");
+	if (f != NULL) {
+		got = fread(buf, 1, length, f);
+		fclose(f);
+	}
+	while (got < length) {
+		uint64_t now = 0;
+
+		(void) nsu_getmonotonic_ms(&now);
+		buf[got] = (uint8_t) (rand() ^ now ^ (now >> 8) ^ (got * 131));
+		got++;
+	}
+
+	return JS_NewArrayBufferCopy(jctx, buf, length);
+}
+
+
+/**
  * Native: scroll the window to a position in the document.
  */
 static JSValue
@@ -1779,6 +1822,7 @@ static const JSCFunctionListEntry qjsky_native_funcs[] = {
 	JS_CFUNC_DEF("__netsurf_viewport", 0, qjsky_native_viewport),
 	JS_CFUNC_DEF("__netsurf_style", 2, qjsky_native_style),
 	JS_CFUNC_DEF("__netsurf_css_supports", 1, qjsky_native_css_supports),
+	JS_CFUNC_DEF("__netsurf_random", 1, qjsky_native_random),
 	JS_CFUNC_DEF("__netsurf_scroll_to", 2, qjsky_native_scroll_to),
 	JS_CFUNC_DEF("__netsurf_fetch", 7, qjsky_native_fetch),
 	JS_CFUNC_DEF("__netsurf_fetch_abort", 1, qjsky_native_fetch_abort),

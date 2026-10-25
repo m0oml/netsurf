@@ -944,6 +944,7 @@ html_begin_conversion(html_content *htmlc)
 	dom_exception exc; /* returned by libdom functions */
 	dom_string *node_name = NULL;
 	dom_hubbub_error error;
+	bool first_conversion;
 
 	/* The act of completing the parse can result in additional data
 	 * being flushed through the parser. This may result in new style or
@@ -994,7 +995,11 @@ html_begin_conversion(html_content *htmlc)
 		return false;
 	}
 
-	/* Conversion begins proper at this point */
+	/* Conversion begins proper at this point.  We are called again when
+	 * a stylesheet or script which a script added has been fetched, which
+	 * must not repeat the event.
+	 */
+	first_conversion = (htmlc->conversion_begun == false);
 	htmlc->conversion_begun = true;
 
 	/* complete script execution, including deferred scripts */
@@ -1003,7 +1008,7 @@ html_begin_conversion(html_content *htmlc)
 	/* fire a simple event that bubbles named DOMContentLoaded at
 	 * the Document.
 	 */
-	if (htmlc->jsthread != NULL) {
+	if (first_conversion && htmlc->jsthread != NULL) {
 		js_fire_event(htmlc->jsthread, "DOMContentLoaded",
 			      htmlc->document,
 			      (struct dom_node *)htmlc->document);

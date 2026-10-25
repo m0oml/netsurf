@@ -34,6 +34,8 @@
     style: global.__netsurf_style,
     /* whether a css supports condition holds */
     cssSupports: global.__netsurf_css_supports,
+    /* an ArrayBuffer of random bytes, up to 256 */
+    random: global.__netsurf_random,
     /* scroll the window to a document position */
     scrollTo: global.__netsurf_scroll_to,
     /* start a network request, returning its id; see qjsky.c */
@@ -47,6 +49,7 @@
   };
   for (const name of ["__netsurf_geometry", "__netsurf_viewport",
                       "__netsurf_style", "__netsurf_css_supports",
+                      "__netsurf_random",
                       "__netsurf_scroll_to",
                       "__netsurf_fetch", "__netsurf_fetch_abort",
                       "__netsurf_decode", "__netsurf_window_dispatch"]) {
@@ -1720,6 +1723,41 @@
   }
   defineGlobal("TextEncoder", TextEncoder);
   defineGlobal("TextDecoder", TextDecoder);
+
+  /* Web Crypto: the random number parts only, there is no SubtleCrypto */
+  const cryptoBytes = (length) => new Uint8Array(native.random(length));
+  const cryptoIntegerTypes = [Int8Array, Uint8Array, Uint8ClampedArray,
+                              Int16Array, Uint16Array, Int32Array, Uint32Array,
+                              BigInt64Array, BigUint64Array];
+  const crypto = {
+    getRandomValues(array) {
+      if (!ArrayBuffer.isView(array) ||
+          !cryptoIntegerTypes.some((type) => array instanceof type)) {
+        throw domError("TypeMismatchError",
+          "getRandomValues needs an integer typed array");
+      }
+      if (array.byteLength > 65536) {
+        throw domError("QuotaExceededError",
+          "getRandomValues is limited to 65536 bytes");
+      }
+      const target = new Uint8Array(array.buffer, array.byteOffset,
+                                    array.byteLength);
+      for (let at = 0; at < target.length; at += 256) {
+        target.set(cryptoBytes(Math.min(256, target.length - at)), at);
+      }
+      return array;
+    },
+    randomUUID() {
+      const b = cryptoBytes(16);
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const hex = Array.from(b, (v) => v.toString(16).padStart(2, "0"));
+      return hex.slice(0, 4).join("") + "-" + hex.slice(4, 6).join("") + "-" +
+        hex.slice(6, 8).join("") + "-" + hex.slice(8, 10).join("") + "-" +
+        hex.slice(10).join("");
+    }
+  };
+  defineGlobal("crypto", crypto);
 
   /* URL and URLSearchParams following the WHATWG URL standard.
    *

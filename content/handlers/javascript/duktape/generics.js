@@ -40,7 +40,8 @@ return {
 	    get: function(target, key) {
 		var index = keyIndex(key);
 		if (index != -1) {
-		    return target.item(index);
+		    /* past the end is undefined, where item() gives null */
+		    return (index < target.length) ? target.item(index) : undefined;
 		} else {
 		    return target[key];
 		}
@@ -61,7 +62,8 @@ return {
 	    get: function(target, key) {
 		var index = keyIndex(key);
 		if (index != -1) {
-		    return target.item(index);
+		    /* past the end is undefined, where item() gives null */
+		    return (index < target.length) ? target.item(index) : undefined;
 		} else {
 		    var attr = target.getNamedItem(key);
 		    if (attr) {
