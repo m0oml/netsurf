@@ -4566,8 +4566,14 @@
         seen.add(key);
         const descriptor = Object.getOwnPropertyDescriptor(o, key);
         if (descriptor && typeof descriptor.value === "function") {
+          const bound = descriptor.value.bind(target);
+          /* An error is shown with its stack, as a browser does */
+          const withStacks = key === "error" || key === "warn" ?
+            (...args) => bound(...args.map((a) => a instanceof Error && a.stack ?
+              `${a.name}: ${a.message}\n${a.stack}` : a))
+            : bound;
           Object.defineProperty(target, key, {
-            value: descriptor.value.bind(target),
+            value: withStacks,
             writable: true,
             enumerable: true,
             configurable: true
@@ -4605,6 +4611,10 @@
         return point;
       }
       const mark = entries.findLast((e) => e.entryType === "mark" && e.name === String(point));
+      if (!mark && /^(navigationStart|fetchStart|requestStart|responseStart|responseEnd|domLoading|domInteractive|domContentLoadedEventStart|domContentLoadedEventEnd|domComplete|loadEventStart|loadEventEnd)$/.test(point)) {
+        /* The names of the old timing attributes, from the start */
+        return 0;
+      }
       if (!mark) {
         throw domError("SyntaxError", `The mark '${point}' does not exist`);
       }
@@ -5836,10 +5846,22 @@
    */
   defineAccessors(Document.prototype, {
     get currentScript() {
+      const scripts = this.getElementsByTagName("script");
       if (this.readyState !== "loading") {
+        /* A script run later is found by the address in the stack, as
+         * bundlers hand it to their loaders (Turbopack) */
+        const frames = String(new Error().stack).match(/\(([a-z]+:[^\s)]*?):\d+:\d+\)/g);
+        const url = frames ?
+          frames[0].slice(1).replace(/:\d+:\d+\)$/, "") : null;
+        if (url) {
+          for (let i = scripts.length - 1; i >= 0; i--) {
+            if (scripts[i].src === url) {
+              return scripts[i];
+            }
+          }
+        }
         return null;
       }
-      const scripts = this.getElementsByTagName("script");
       return scripts.length > 0 ? scripts[scripts.length - 1] : null;
     }
   });
