@@ -148,6 +148,18 @@ article, aside, figcaption, figure, footer, header, main, nav, section {
 	display: block;
 }
 
+/* A dialog is only there when open.  There is no top layer, so an open
+ * one is placed over the page. */
+dialog { display: none; }
+dialog[open] { display: block; position: absolute; left: 20%; right: 20%;
+	top: 3em; z-index: 2147483647; margin: 0; padding: 1em;
+	border: 2px solid #000; background-color: #fff; color: #000; }
+
+/* The contents of a details element are only there when it is open */
+details { display: block; }
+summary { display: block; }
+details:not([open]) > *:not(summary) { display: none; }
+
 mark {
 	background: yellow;
 	color: black;

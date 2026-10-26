@@ -4935,6 +4935,103 @@
     });
   }
 
+  /* Dialogs and details
+   *
+   * The bindings make these as plain HTMLElements, so the members are
+   * on that prototype and only appear for the elements they belong to.
+   */
+  {
+    const proto = global.HTMLElement.prototype;
+    const returnValues = new WeakMap();
+    const isTag = (el, tag) => el.tagName === tag;
+    const hasOpen = (el) => isTag(el, "DIALOG") || isTag(el, "DETAILS");
+
+    const closeDialog = (dialog, value) => {
+      if (!dialog.hasAttribute("open")) {
+        return;
+      }
+      if (value !== undefined) {
+        returnValues.set(dialog, String(value));
+      }
+      dialog.removeAttribute("open");
+      setTimeout(() => dialog.dispatchEvent(new Event("close")), 0);
+    };
+    const dialogMethods = {
+      show() {
+        if (!this.hasAttribute("open")) {
+          this.setAttribute("open", "");
+        }
+      },
+      showModal() {
+        if (this.hasAttribute("open")) {
+          throw domError("InvalidStateError", "The dialog is already open");
+        }
+        this.setAttribute("open", "");
+      },
+      close(value) { closeDialog(this, value); },
+      requestClose(value) {
+        const cancel = new Event("cancel", { cancelable: true });
+        if (this.hasAttribute("open") && this.dispatchEvent(cancel)) {
+          closeDialog(this, value);
+        }
+      }
+    };
+    for (const name of Object.keys(dialogMethods)) {
+      Object.defineProperty(proto, name, {
+        get() { return isTag(this, "DIALOG") ? dialogMethods[name] : undefined; },
+        set(value) { Object.defineProperty(this, name, { value, writable: true, configurable: true }); },
+        enumerable: true, configurable: true
+      });
+    }
+    Object.defineProperty(proto, "open", {
+      get() { return hasOpen(this) ? this.hasAttribute("open") : undefined; },
+      set(value) {
+        if (!hasOpen(this)) {
+          Object.defineProperty(this, "open", { value, writable: true, configurable: true });
+        } else if (value) {
+          this.setAttribute("open", "");
+        } else {
+          this.removeAttribute("open");
+        }
+      },
+      enumerable: true, configurable: true
+    });
+    Object.defineProperty(proto, "returnValue", {
+      get() { return isTag(this, "DIALOG") ? (returnValues.get(this) ?? "") : undefined; },
+      set(value) {
+        if (isTag(this, "DIALOG")) {
+          returnValues.set(this, String(value));
+        } else {
+          Object.defineProperty(this, "returnValue", { value, writable: true, configurable: true });
+        }
+      },
+      enumerable: true, configurable: true
+    });
+
+    /* A form with method dialog closes its dialog, and a summary opens
+     * and closes its details
+     */
+    global.document.addEventListener("click", (event) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      let node = event.target;
+      while (node && node.nodeType === 1 && node.tagName !== "SUMMARY") {
+        node = node.parentNode;
+      }
+      if (node && node.nodeType === 1 && node.parentNode && isTag(node.parentNode, "DETAILS") &&
+          node === Array.from(node.parentNode.children).find((c) => c.tagName === "SUMMARY")) {
+        const details = node.parentNode;
+        if (details.hasAttribute("open")) {
+          details.removeAttribute("open");
+        } else {
+          details.setAttribute("open", "");
+        }
+        setTimeout(() => details.dispatchEvent(new Event("toggle")), 0);
+      }
+    });
+  }
+
   /* Idle callbacks */
 
   global.requestIdleCallback = function requestIdleCallback(callback, options) {
