@@ -2902,7 +2902,19 @@
   /* libdom has no notion of the document URL so find the base here */
   const documentBase = (doc) => {
     const url = doc.URL;
-    const base = doc.querySelector ? doc.querySelector("base[href]") : null;
+    /* this is asked for each URL attribute read, so it is the natives
+     * which look and not the selector matching in script
+     */
+    let base = null;
+    if (doc.getElementsByTagName) {
+      const bases = doc.getElementsByTagName("base");
+      for (let i = 0; i < bases.length; i++) {
+        if (bases[i].hasAttribute("href")) {
+          base = bases[i];
+          break;
+        }
+      }
+    }
     if (base) {
       try {
         return new URL(base.getAttribute("href"), url).href;
@@ -3019,6 +3031,22 @@
     value: EventTarget, writable: true, configurable: true
   });
   defineGlobal("EventTarget", EventTarget);
+
+  /* The visual viewport is the layout viewport, as there is no pinch zoom */
+  class VisualViewport extends EventTarget {
+    get offsetLeft() { return 0; }
+    get offsetTop() { return 0; }
+    get pageLeft() { return viewport.scrollX; }
+    get pageTop() { return viewport.scrollY; }
+    get width() { return viewport.width; }
+    get height() { return viewport.height; }
+    get scale() { return 1; }
+    onresize = null;
+    onscroll = null;
+    onscrollend = null;
+  }
+  defineGlobal("VisualViewport", VisualViewport);
+  defineGlobal("visualViewport", new VisualViewport());
 
   /* Set a read only member of an event, which the binding would set
    * during a real dispatch
@@ -5138,8 +5166,14 @@
       }
     }
 
+    /* These can be called without new as well */
+    const callable = (type) => new Proxy(type, {
+      apply(target, thisArg, args) { return new target(...args); }
+    });
     const Intl = {
-      NumberFormat, DateTimeFormat, Collator, PluralRules, RelativeTimeFormat, ListFormat, Segmenter,
+      NumberFormat: callable(NumberFormat), DateTimeFormat: callable(DateTimeFormat),
+      Collator: callable(Collator),
+      PluralRules, RelativeTimeFormat, ListFormat, Segmenter,
       getCanonicalLocales: (locales) => [].concat(locales || []),
       supportedValuesOf: () => []
     };
