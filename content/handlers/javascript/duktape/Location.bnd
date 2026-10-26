@@ -177,10 +177,13 @@ getter Location::protocol()
 
 	nsurl_get(priv->url, NSURL_SCHEME, &url_s, &url_l);
 
-	/* if url_s is NULL duk_push_lstring pushes an empty string
-	 * which is correct for this API
-	 */
-	duk_push_lstring(ctx, url_s, url_l);
+	if ((url_s == NULL) || (url_l == 0)) {
+		duk_push_string(ctx, "");
+	} else {
+		duk_push_lstring(ctx, url_s, url_l);
+		duk_push_string(ctx, ":");
+		duk_concat(ctx, 2);
+	}
 
 	if (url_s != NULL) {
 		free(url_s);
@@ -235,11 +238,9 @@ getter Location::host()
 	char *url_s = NULL;
 	size_t url_l;
 
-	nsurl_get(priv->url, NSURL_HOST, &url_s, &url_l);
+	/* the host with its port, if it has one */
+	nsurl_get(priv->url, NSURL_HOST | NSURL_PORT, &url_s, &url_l);
 
-	/* if url_s is NULL duk_push_lstring pushes an empty string
-	 * which is correct for this API
-	 */
 	duk_push_lstring(ctx, url_s, url_l);
 
 	if (url_s != NULL) {
@@ -278,10 +279,12 @@ getter Location::port()
 
 	nsurl_get(priv->url, NSURL_PORT, &url_s, &url_l);
 
-	/* if url_s is NULL duk_push_lstring pushes an empty string
-	 * which is correct for this API
-	 */
-	duk_push_lstring(ctx, url_s, url_l);
+	/* the port is the digits only */
+	if ((url_s != NULL) && (url_l > 0) && (url_s[0] == ':')) {
+		duk_push_lstring(ctx, url_s + 1, url_l - 1);
+	} else {
+		duk_push_lstring(ctx, url_s, url_l);
+	}
 
 	if (url_s != NULL) {
 		free(url_s);
@@ -318,10 +321,16 @@ getter Location::search()
 
 	nsurl_get(priv->url, NSURL_QUERY, &url_s, &url_l);
 
-	/* if url_s is NULL duk_push_lstring pushes an empty string
-	 * which is correct for this API
+	/* an empty component gives an empty string, otherwise the
+	 * separator is part of the result
 	 */
-	duk_push_lstring(ctx, url_s, url_l);
+	if ((url_s == NULL) || (url_l == 0)) {
+		duk_push_string(ctx, "");
+	} else {
+		duk_push_string(ctx, "?");
+		duk_push_lstring(ctx, url_s, url_l);
+		duk_concat(ctx, 2);
+	}
 
 	if (url_s != NULL) {
 		free(url_s);
@@ -338,10 +347,16 @@ getter Location::hash()
 
 	nsurl_get(priv->url, NSURL_FRAGMENT, &url_s, &url_l);
 
-	/* if url_s is NULL duk_push_lstring pushes an empty string
-	 * which is correct for this API
+	/* an empty component gives an empty string, otherwise the
+	 * separator is part of the result
 	 */
-	duk_push_lstring(ctx, url_s, url_l);
+	if ((url_s == NULL) || (url_l == 0)) {
+		duk_push_string(ctx, "");
+	} else {
+		duk_push_string(ctx, "#");
+		duk_push_lstring(ctx, url_s, url_l);
+		duk_concat(ctx, 2);
+	}
 
 	if (url_s != NULL) {
 		free(url_s);
