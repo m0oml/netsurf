@@ -360,6 +360,8 @@
   eventConstructor("MessageEvent", EventCtor, {
     data: null, origin: "", lastEventId: "", source: null, ports: []
   });
+  /* Its presence tells a polyfill that promises report rejections */
+  eventConstructor("PromiseRejectionEvent", EventCtor, { promise: null, reason: undefined });
   eventConstructor("HashChangeEvent", EventCtor, { oldURL: "", newURL: "" });
   eventConstructor("PopStateEvent", EventCtor, { state: null });
   eventConstructor("PageTransitionEvent", EventCtor, { persisted: false });
@@ -5865,6 +5867,61 @@
       return scripts.length > 0 ? scripts[scripts.length - 1] : null;
     }
   });
+
+  /* innerText and outerText: the rendered text
+   *
+   * Hidden elements and scripts add nothing; a line break is put round
+   * the blocks, and for <br>.
+   */
+  {
+    const skip = new Set(["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "HEAD", "TITLE"]);
+    const blocks = new Set(["ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DD", "DIV", "DL", "DT",
+      "FIELDSET", "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6",
+      "HEADER", "HR", "LI", "MAIN", "NAV", "OL", "P", "PRE", "SECTION", "TABLE", "TR", "UL"]);
+    const inline = (d) => d === "inline" || d === "inline-block" || d === "contents" ||
+      d === "inline-flex" || d === "inline-grid" || d === "table-cell" || d === "";
+    const render = (node, out) => {
+      for (let c = node.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 3) {
+          out.push(c.data.replace(/[ \t\r\n]+/g, " "));
+        } else if (c.nodeType === 1 && !skip.has(c.tagName)) {
+          /* While the page loads there is no layout, so go by the tag */
+          const display = c.ownerDocument.defaultView.getComputedStyle(c).display ||
+            (c.hasAttribute("hidden") || /display\s*:\s*none/i.test(c.getAttribute("style") || "") ? "none" :
+              blocks.has(c.tagName) ? "block" : "inline");
+          if (display === "none") {
+            continue;
+          }
+          if (c.tagName === "BR") {
+            out.push("\n");
+            continue;
+          }
+          const block = !inline(display);
+          if (block) {
+            out.push("\n");
+          }
+          render(c, out);
+          if (block) {
+            out.push("\n");
+          }
+        }
+      }
+    };
+    const text = (el) => {
+      const out = [];
+      render(el, out);
+      return out.join("").replace(/ *\n */g, "\n").replace(/\n{2,}/g, "\n")
+        .replace(/^\n+|\n+$/g, "").replace(/^ +| +$/g, "");
+    };
+    const accessors = {
+      get() { return this.nodeType === 1 ? text(this) : undefined; },
+      set(value) { this.textContent = String(value); },
+      enumerable: true, configurable: true
+    };
+    for (const name of ["innerText", "outerText"]) {
+      Object.defineProperty(HTMLElement.prototype, name, accessors);
+    }
+  }
 
   /* Media elements, which the bindings make plain elements
    *
