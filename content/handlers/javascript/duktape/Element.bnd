@@ -228,7 +228,7 @@ getter Element::tagName ()
 	exc = dom_element_get_tag_name(priv->parent.node, &tag);
 	if ((exc != DOM_NO_ERR) || (tag == NULL)) return 0;
 
-	duk_push_lstring(ctx, dom_string_data(tag), dom_string_length(tag));
+	duk_push_lstring(ctx, dom_string_data(tag), dom_string_byte_length(tag));
 	dom_string_unref(tag);
 
 	return 1;
@@ -245,7 +245,7 @@ getter Element::namespaceURI ()
 	if (ns == NULL) {
 		duk_push_null(ctx);
 	} else {
-		duk_push_lstring(ctx, dom_string_data(ns), dom_string_length(ns));
+		duk_push_lstring(ctx, dom_string_data(ns), dom_string_byte_length(ns));
 		dom_string_unref(ns);
 	}
 
@@ -263,7 +263,7 @@ getter Element::prefix ()
 	if (pfx == NULL) {
 		duk_push_null(ctx);
 	} else {
-		duk_push_lstring(ctx, dom_string_data(pfx), dom_string_length(pfx));
+		duk_push_lstring(ctx, dom_string_data(pfx), dom_string_byte_length(pfx));
 		dom_string_unref(pfx);
 	}
 
@@ -284,7 +284,7 @@ getter Element::localName ()
 	dom_string_unref(name);
 	if (exc != DOM_NO_ERR) return 0;
 
-	duk_push_lstring(ctx, dom_string_data(lower), dom_string_length(lower));
+	duk_push_lstring(ctx, dom_string_data(lower), dom_string_byte_length(lower));
 	dom_string_unref(lower);
 
 	return 1;
@@ -303,7 +303,7 @@ getter Element::id ()
 		duk_push_lstring(ctx, "", 0);
 	} else {
 		duk_push_lstring(ctx, dom_string_data(idstr),
-				 dom_string_length(idstr));
+				 dom_string_byte_length(idstr));
 		dom_string_unref(idstr);
 	}
 	return 1;
@@ -369,7 +369,7 @@ method Element::getAttribute()
 		duk_push_null(ctx);
 	} else {
 		duk_push_lstring(ctx, dom_string_data(attr_value),
-				 dom_string_length(attr_value));
+				 dom_string_byte_length(attr_value));
 		dom_string_unref(attr_value);
 	}
 	return 1;
@@ -438,7 +438,7 @@ getter Element::className ()
 		duk_push_lstring(ctx, "", 0);
 	} else {
 		duk_push_lstring(ctx, dom_string_data(classstr),
-				 dom_string_length(classstr));
+				 dom_string_byte_length(classstr));
 		dom_string_unref(classstr);
 	}
 	return 1;

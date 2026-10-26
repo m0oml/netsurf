@@ -37,7 +37,7 @@ getter Event::type ()
 		duk_push_lstring(ctx, "", 0);
 	} else {
 		duk_push_lstring(ctx, dom_string_data(ret),
-				dom_string_length(ret));
+				dom_string_byte_length(ret));
 		dom_string_unref(ret);
 	}
 

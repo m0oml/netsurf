@@ -43,7 +43,7 @@ getter Node::nodeName()
 	dom_string *str = NULL;
 	exc = dom_node_get_node_name(priv->node, &str);
 	if (exc != DOM_NO_ERR) return 0;
-	duk_push_lstring(ctx, dom_string_data(str), dom_string_length(str));
+	duk_push_lstring(ctx, dom_string_data(str), dom_string_byte_length(str));
 	dom_string_unref(str);
 	return 1;
 %}
@@ -55,7 +55,7 @@ getter Node::baseURI()
 	exc = dom_node_get_base(priv->node, &base);
 	if (exc != DOM_NO_ERR) return 0;
 	assert(base != NULL);
-	duk_push_lstring(ctx, dom_string_data(base), dom_string_length(base));
+	duk_push_lstring(ctx, dom_string_data(base), dom_string_byte_length(base));
 	dom_string_unref(base);
 	return 1;
 %}
@@ -204,7 +204,7 @@ getter Node::nodeValue()
 	}
 
 	if (content != NULL) {
-		duk_push_lstring(ctx, dom_string_data(content), dom_string_length(content));
+		duk_push_lstring(ctx, dom_string_data(content), dom_string_byte_length(content));
 		dom_string_unref(content);
 		return 1;
 	}
@@ -236,7 +236,7 @@ getter Node::textContent()
 	}
 
 	if (content != NULL) {
-		duk_push_lstring(ctx, dom_string_data(content), dom_string_length(content));
+		duk_push_lstring(ctx, dom_string_data(content), dom_string_byte_length(content));
 		dom_string_unref(content);
 		return 1;
 	}
@@ -357,7 +357,7 @@ method Node::lookupPrefix()
 	dom_string_unref(ns);
 	if (exc != DOM_NO_ERR) return 0;
 	if (pfx == NULL) return 0;
-	duk_push_lstring(ctx, dom_string_data(pfx), dom_string_length(pfx));
+	duk_push_lstring(ctx, dom_string_data(pfx), dom_string_byte_length(pfx));
 	dom_string_unref(pfx);
 	return 0;
 %}
@@ -374,7 +374,7 @@ method Node::lookupNamespaceURI()
 	dom_string_unref(pfx);
 	if (exc != DOM_NO_ERR) return 0;
 	if (ns == NULL) return 0;
-	duk_push_lstring(ctx, dom_string_data(ns), dom_string_length(ns));
+	duk_push_lstring(ctx, dom_string_data(ns), dom_string_byte_length(ns));
 	dom_string_unref(ns);
 	return 0;
 %}

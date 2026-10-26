@@ -20,7 +20,7 @@ static void attr_push_string(duk_context *ctx, dom_string *str)
 	if (str == NULL) {
 		duk_push_null(ctx);
 	} else {
-		duk_push_lstring(ctx, dom_string_data(str), dom_string_length(str));
+		duk_push_lstring(ctx, dom_string_data(str), dom_string_byte_length(str));
 		dom_string_unref(str);
 	}
 }

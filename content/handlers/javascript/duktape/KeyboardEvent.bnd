@@ -20,7 +20,7 @@ getter KeyboardEvent::key ()
 		return 0;
 	}
 
-	duk_push_lstring(ctx, dom_string_data(key), dom_string_length(key));
+	duk_push_lstring(ctx, dom_string_data(key), dom_string_byte_length(key));
 	dom_string_unref(key);
 	return 1;
 %}
@@ -35,7 +35,7 @@ getter KeyboardEvent::code ()
 		return 0;
 	}
 
-	duk_push_lstring(ctx, dom_string_data(code), dom_string_length(code));
+	duk_push_lstring(ctx, dom_string_data(code), dom_string_byte_length(code));
 	dom_string_unref(code);
 	return 1;
 %}

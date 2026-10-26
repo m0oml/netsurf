@@ -142,7 +142,7 @@ static nserror canvas2d_create_bitmap(dom_node *node, struct bitmap **bitmap_out
 					&width_s);
 	if (exc == DOM_NO_ERR && width_s != NULL) {
 		const char *ptr = (const char *)dom_string_data(width_s);
-		const char *endptr = ptr + dom_string_length(width_s);
+		const char *endptr = ptr + dom_string_byte_length(width_s);
 		char * ended;
 		unsigned long width_n = strtoul(ptr, &ended, 10);
 
@@ -159,7 +159,7 @@ static nserror canvas2d_create_bitmap(dom_node *node, struct bitmap **bitmap_out
 					&height_s);
 	if (exc == DOM_NO_ERR && height_s != NULL) {
 		const char *ptr = (const char *)dom_string_data(height_s);
-		const char *endptr = ptr + dom_string_length(height_s);
+		const char *endptr = ptr + dom_string_byte_length(height_s);
 		char * ended;
 		unsigned long height_n = strtoul(ptr, &ended, 10);
 

@@ -481,9 +481,10 @@ getter Window::navigator()
 
 getter Window::name()
 %{
-	const char *name;
+	const char *name = NULL;
 	browser_window_get_name(priv->win, &name);
-	duk_push_string(ctx, name);
+	/* a window which has no name has an empty one, not null */
+	duk_push_string(ctx, name != NULL ? name : "");
 	return 1;
 %}
 

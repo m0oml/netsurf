@@ -3458,7 +3458,7 @@ static void dukky_push_handler_code_(duk_context *ctx, dom_string *name,
 	}
 
 	dom_string_unref(onname);
-	duk_push_lstring(ctx, dom_string_data(val), dom_string_length(val));
+	duk_push_lstring(ctx, dom_string_data(val), dom_string_byte_length(val));
 	dom_string_unref(val);
 }
 
@@ -3472,7 +3472,7 @@ bool dukky_get_current_value_of_event_handler(duk_context *ctx,
 	 */
 	duk_get_prop_string(ctx, -1, HANDLER_MAGIC);
 	/* ... node handlers */
-	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
+	duk_push_lstring(ctx, dom_string_data(name), dom_string_byte_length(name));
 	/* ... node handlers name */
 	duk_get_prop(ctx, -2);
 	/* ... node handlers handler? */
@@ -3574,7 +3574,7 @@ qjsky_call_listeners(duk_context *ctx,
 	event_listener_flags flags;
 
 	/* ... */
-	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
+	duk_push_lstring(ctx, dom_string_data(name), dom_string_byte_length(name));
 	qjsky_push_target(ctx, targ);
 	/* ... type node */
 	if (dukky_event_target_push_listeners(ctx, true)) {
@@ -3681,7 +3681,7 @@ static void dukky_generic_event_handler(dom_event *evt, void *pw)
 		NSLOG(qjsky, DEBUG, "Unable to find the event name");
 		return;
 	}
-	NSLOG(qjsky, DEBUG, "Event's name is %*s", (int)dom_string_length(name),
+	NSLOG(qjsky, DEBUG, "Event's name is %*s", (int)dom_string_byte_length(name),
 	      dom_string_data(name));
 	exc = dom_event_get_event_phase(evt, &phase);
 	if (exc != DOM_NO_ERR) {
@@ -3809,7 +3809,7 @@ void dukky_register_event_listener_for(duk_context *ctx,
 	/* ... node */
 	duk_get_prop_string(ctx, -1, HANDLER_LISTENER_MAGIC);
 	/* ... node handlers */
-	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
+	duk_push_lstring(ctx, dom_string_data(name), dom_string_byte_length(name));
 	/* ... node handlers name */
 	if (duk_has_prop(ctx, -2)) {
 		/* ... node handlers */
@@ -3818,7 +3818,7 @@ void dukky_register_event_listener_for(duk_context *ctx,
 		return;
 	}
 	/* ... node handlers */
-	duk_push_lstring(ctx, dom_string_data(name), dom_string_length(name));
+	duk_push_lstring(ctx, dom_string_data(name), dom_string_byte_length(name));
 	/* ... node handlers name */
 	duk_push_boolean(ctx, true);
 	/* ... node handlers name true */
@@ -3844,7 +3844,7 @@ void dukky_register_event_listener_for(duk_context *ctx,
 	if (exc != DOM_NO_ERR) {
 		NSLOG(qjsky, DEBUG,
 		      "Unable to register listener for %p.%*s", ele,
-		      (int)dom_string_length(name), dom_string_data(name));
+		      (int)dom_string_byte_length(name), dom_string_data(name));
 		return;
 	}
 
@@ -3856,10 +3856,10 @@ void dukky_register_event_listener_for(duk_context *ctx,
 	if (exc != DOM_NO_ERR) {
 		NSLOG(qjsky, DEBUG,
 		      "Unable to register listener for %p.%*s", ele,
-		      (int)dom_string_length(name), dom_string_data(name));
+		      (int)dom_string_byte_length(name), dom_string_data(name));
 	} else {
 		NSLOG(qjsky, DEBUG, "have registered listener for %p.%*s",
-		      ele, (int)dom_string_length(name), dom_string_data(name));
+		      ele, (int)dom_string_byte_length(name), dom_string_data(name));
 	}
 	dom_event_listener_unref(listen);
 }
@@ -4058,7 +4058,7 @@ qjsky_window_event(jsthread *thread,
 	/* ... */
 	duk_get_global_string(CTX, HANDLER_MAGIC);
 	/* ... handlers */
-	duk_push_lstring(CTX, dom_string_data(type), dom_string_length(type));
+	duk_push_lstring(CTX, dom_string_data(type), dom_string_byte_length(type));
 	/* ... handlers type */
 	duk_get_prop(CTX, -2);
 	/* ... handlers handler? */

@@ -52,7 +52,7 @@ method DOMTokenList::item()
         return 1;
     }
 
-    duk_push_lstring(ctx, dom_string_data(value), dom_string_length(value));
+    duk_push_lstring(ctx, dom_string_data(value), dom_string_byte_length(value));
 	dom_string_unref(value);
 
 	return 1;
