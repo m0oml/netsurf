@@ -294,6 +294,38 @@ static inline int layout_flex__auto_min_height(const struct box *b)
 }
 
 /**
+ * Find the automatic minimum width of an item in a row.
+ *
+ * An item may not shrink below its content, unless it scrolls or has a
+ * minimum width of its own.  If it has a width set, that is the least
+ * it needs to be if that is less than its content.
+ *
+ * \param b                the item
+ * \param delta_outer_main  space the item's margins, borders and padding
+ *                          take in the main direction
+ * \return the automatic minimum width, with margins, borders and padding
+ */
+static inline int layout_flex__auto_min_width(const struct box *b,
+		int delta_outer_main)
+{
+	int min = b->min_width;
+
+	if (css_computed_overflow_x(b->style) != CSS_OVERFLOW_VISIBLE) {
+		return 0;
+	}
+
+	if (!css_computed_min_width_is_auto(b->style)) {
+		return 0;
+	}
+
+	if (b->width != AUTO && b->width + delta_outer_main < min) {
+		min = b->width + delta_outer_main;
+	}
+
+	return min;
+}
+
+/**
  * Calculate an item's base and target main sizes.
  *
  * \param[in] ctx              Flex layout context
@@ -382,7 +414,8 @@ static inline bool layout_flex__base_and_main_sizes(
 	}
 
 	if (ctx->horizontal) {
-		item->auto_min_main = b->min_width;
+		item->auto_min_main = layout_flex__auto_min_width(b,
+				delta_outer_main);
 	} else {
 		item->auto_min_main = layout_flex__auto_min_height(b) +
 				delta_outer_main;
@@ -392,7 +425,7 @@ static inline bool layout_flex__base_and_main_sizes(
 
 	if (ctx->horizontal) {
 		item->base_size = min(item->base_size, available_width);
-		item->base_size = max(item->base_size, content_min_width);
+		item->base_size = max(item->base_size, item->auto_min_main);
 	}
 
 	item->target_main_size = item->base_size;
